@@ -31,6 +31,27 @@ xrp
 - 添加中转后可直接新增或绑定入站节点
 - 支持全部走中转、仅 AI 走中转、AI + 流媒体走中转
 - 自动生成并校验 `/usr/local/etc/xray/config.json`
+- 生成 Clash Meta / mihomo YAML 配置文件，不需要额外开放订阅端口
+
+## Clash 配置
+
+菜单选择：
+
+```text
+[18] 生成 Clash 配置文件
+```
+
+可生成单节点配置或全部节点配置，文件默认保存在：
+
+```text
+/usr/local/etc/xray/xrp/clash/
+```
+
+下载到本地示例：
+
+```sh
+scp root@你的VPS:/usr/local/etc/xray/xrp/clash/all.yaml .
+```
 
 ## 卸载
 
