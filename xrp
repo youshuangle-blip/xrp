@@ -6,6 +6,7 @@
 #           只缺 python3 时单独安装而非整套重装。
 # v4.3 变更：添加中转时支持解析 ss/socks/vless 节点链接；
 #           添加中转后可直接新增或绑定入站节点并设置中转策略。
+# v4.4 变更：新增面板脚本自更新菜单，从 GitHub 拉取最新版 xrp。
 
 set -u
 
@@ -15,7 +16,10 @@ DAT_DIR="/usr/local/share/xray"
 DATA_DIR="$CONF_DIR/xrp"
 NODES_DIR="$DATA_DIR/nodes"
 RELAYS_DIR="$DATA_DIR/relays"
-PANEL_VER="2026.06.15-v4.3"
+PANEL_VER="2026.06.15-v4.4"
+PANEL_REPO="youshuangle-blip/xrp"
+PANEL_BRANCH="${XRP_BRANCH:-main}"
+PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
 
 red(){ printf "\033[31m%s\033[0m\n" "$*"; }
 green(){ printf "\033[32m%s\033[0m\n" "$*"; }
@@ -1308,6 +1312,32 @@ sync_time(){
   green "已尝试同步系统时间。"
 }
 
+update_panel(){
+  need_root
+  TMP="/tmp/xrp-panel-update.$$"
+  TARGET="$(command -v xrp 2>/dev/null || true)"
+  [ -n "$TARGET" ] || TARGET="/usr/local/bin/xrp"
+  yellow "当前版本：$PANEL_VER"
+  yellow "正在从 GitHub 下载最新版面板..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$PANEL_RAW_URL" -o "$TMP" || { rm -f "$TMP"; red "下载失败：$PANEL_RAW_URL"; return 1; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$TMP" "$PANEL_RAW_URL" || { rm -f "$TMP"; red "下载失败：$PANEL_RAW_URL"; return 1; }
+  else
+    red "需要 curl 或 wget 才能更新面板。"
+    return 1
+  fi
+  if [ ! -s "$TMP" ] || ! head -n1 "$TMP" | grep -q "^#!/bin/sh"; then
+    rm -f "$TMP"
+    red "下载内容异常，已取消更新。"
+    return 1
+  fi
+  install -m 755 "$TMP" "$TARGET" || { rm -f "$TMP"; red "安装更新失败：$TARGET"; return 1; }
+  rm -f "$TMP"
+  green "面板已更新：$TARGET"
+  yellow "请退出后重新运行 xrp 使用新版本。"
+}
+
 uninstall_panel(){
   echo " [1] 仅删除面板"
   echo " [2] 删除面板 + Xray + 所有配置"
@@ -1354,6 +1384,7 @@ menu(){
   echo "【配置与更新】"
   echo " [12] 检查配置文件         [13] 应用当前配置"
   echo " [14] 安装/更新 Xray 核心  [15] 卸载脚本"
+  echo " [17] 更新面板脚本"
   echo ""
   echo "【进阶功能】"
   echo " [16] 中转管理"
@@ -1385,6 +1416,7 @@ while true; do
     14) install_xray; pause ;;
     15) uninstall_panel; pause ;;
     16) relay_menu; pause ;;
+    17) update_panel; pause ;;
     0) exit 0 ;;
     *) red "无效选择"; pause ;;
   esac
