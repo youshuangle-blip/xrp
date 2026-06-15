@@ -7,6 +7,7 @@
 # v4.3 变更：添加中转时支持解析 ss/socks/vless 节点链接；
 #           添加中转后可直接新增或绑定入站节点并设置中转策略。
 # v4.4 变更：新增面板脚本自更新菜单，从 GitHub 拉取最新版 xrp。
+# v4.5 变更：查看/生成节点链接时同时输出 Clash Meta YAML 配置。
 
 set -u
 
@@ -16,7 +17,7 @@ DAT_DIR="/usr/local/share/xray"
 DATA_DIR="$CONF_DIR/xrp"
 NODES_DIR="$DATA_DIR/nodes"
 RELAYS_DIR="$DATA_DIR/relays"
-PANEL_VER="2026.06.15-v4.4"
+PANEL_VER="2026.06.15-v4.5"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -606,6 +607,88 @@ node_link(){
   fi
 }
 
+clash_yaml(){
+  f="$1"; _mode="${2:-proxy}"; load_node "$f"
+  command -v python3 >/dev/null 2>&1 || { yellow "需要 python3 才能生成 Clash Meta 配置。"; return 1; }
+  python3 - "$_mode" "$NODE_TYPE" "$NODE_NAME" "$PUBLIC_HOST" "$EXT_PORT" "$UUID" "$SNI" "$PUBLIC_KEY" "$SHORT_ID" "$METHOD" "$PASSWORD" "$SOCKS_USER" <<'PY'
+import sys
+
+mode, node_type, name, server, port, uuid, sni, public_key, short_id, method, password, socks_user = sys.argv[1:13]
+
+
+def q(value):
+    value = value or ""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def proxy_lines(indent="  "):
+    if node_type == "vless":
+        return [
+            f"{indent}- name: {q(name)}",
+            f"{indent}  type: vless",
+            f"{indent}  server: {q(server)}",
+            f"{indent}  port: {port}",
+            f"{indent}  uuid: {q(uuid)}",
+            f"{indent}  network: tcp",
+            f"{indent}  tls: true",
+            f"{indent}  udp: true",
+            f"{indent}  flow: xtls-rprx-vision",
+            f"{indent}  servername: {q(sni)}",
+            f"{indent}  client-fingerprint: chrome",
+            f"{indent}  reality-opts:",
+            f"{indent}    public-key: {q(public_key)}",
+            f"{indent}    short-id: {q(short_id)}",
+        ]
+    if node_type == "ss":
+        return [
+            f"{indent}- name: {q(name)}",
+            f"{indent}  type: ss",
+            f"{indent}  server: {q(server)}",
+            f"{indent}  port: {port}",
+            f"{indent}  cipher: {q(method)}",
+            f"{indent}  password: {q(password)}",
+            f"{indent}  udp: true",
+        ]
+    if node_type == "socks":
+        lines = [
+            f"{indent}- name: {q(name)}",
+            f"{indent}  type: socks5",
+            f"{indent}  server: {q(server)}",
+            f"{indent}  port: {port}",
+            f"{indent}  udp: true",
+        ]
+        if socks_user:
+            lines.extend([
+                f"{indent}  username: {q(socks_user)}",
+                f"{indent}  password: {q(password)}",
+            ])
+        return lines
+    return []
+
+
+if mode == "config":
+    lines = [
+        "mixed-port: 7890",
+        "allow-lan: false",
+        "mode: rule",
+        "log-level: info",
+        "proxies:",
+        *proxy_lines("  "),
+        "proxy-groups:",
+        "  - name: PROXY",
+        "    type: select",
+        "    proxies:",
+        f"      - {q(name)}",
+        "rules:",
+        "  - MATCH,PROXY",
+    ]
+else:
+    lines = proxy_lines("  ")
+
+print("\n".join(lines))
+PY
+}
+
 select_node_file(){
   init_dirs
   files="$(find "$NODES_DIR" -type f -name '*.env' 2>/dev/null | sort)"
@@ -710,6 +793,9 @@ add_node(){
   line
   echo "节点链接/参数："
   node_link "$NODES_DIR/$NODE_ID.env"
+  echo ""
+  echo "Clash Meta 单节点配置："
+  clash_yaml "$NODES_DIR/$NODE_ID.env" config
   apply_config_silent
 }
 
@@ -746,6 +832,8 @@ show_links(){
     if [ "$NODE_TYPE" = "vless" ]; then
       echo "链接："
       node_link "$f"
+      echo "Clash Meta 单节点配置："
+      clash_yaml "$f" config
       echo "客户端参数："
       echo "协议：VLESS"
       echo "UUID：$UUID"
@@ -760,11 +848,15 @@ show_links(){
     elif [ "$NODE_TYPE" = "ss" ]; then
       echo "链接："
       node_link "$f"
+      echo "Clash Meta 单节点配置："
+      clash_yaml "$f" config
       echo "客户端参数："
       echo "协议：Shadowsocks"
       echo "加密：$METHOD"
       echo "密码：$PASSWORD"
     else
+      echo "Clash Meta 单节点配置："
+      clash_yaml "$f" config
       echo "客户端参数："
       echo "协议：SOCKS5"
       echo "用户名：$SOCKS_USER"
@@ -794,6 +886,9 @@ change_node_port(){
   green "端口已修改。"
   echo "节点链接/参数："
   node_link "$NODES_DIR/$NODE_ID.env"
+  echo ""
+  echo "Clash Meta 单节点配置："
+  clash_yaml "$NODES_DIR/$NODE_ID.env" config
   apply_config_silent
 }
 
