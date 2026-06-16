@@ -12,6 +12,7 @@
 # v5.0 变更：核心从 Xray 切换为 sing-box，保留原节点/中转数据。
 # v5.1 变更：修复部分系统安装 sing-box 后 PATH 未识别导致无法生成 Reality 密钥。
 # v5.2 变更：Alpine 优先使用 apk 安装 sing-box，并校验二进制必须可运行。
+# v5.3 变更：适配 sing-box 1.13，移除旧 inbound sniff 字段。
 
 set -u
 
@@ -22,7 +23,7 @@ DATA_DIR="/usr/local/etc/xray/xrp"
 NODES_DIR="$DATA_DIR/nodes"
 RELAYS_DIR="$DATA_DIR/relays"
 CLASH_DIR="$DATA_DIR/clash"
-PANEL_VER="2026.06.17-v5.2"
+PANEL_VER="2026.06.17-v5.3"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -1562,8 +1563,6 @@ for n in nodes:
         "type": "",
         "listen": "0.0.0.0",
         "listen_port": to_int(n.get("LISTEN_PORT")),
-        "sniff": True,
-        "sniff_override_destination": True,
     }
     if t == "vless":
         sni = n.get("SNI")
@@ -1641,11 +1640,16 @@ for r in relays:
             outbound["transport"] = transport
         outbounds.append(outbound)
 
-rules = [{
+inbound_tags = [n.get("NODE_TAG") for n in nodes if n.get("NODE_TAG")]
+rules = []
+if inbound_tags:
+    rules.append({"inbound": inbound_tags, "action": "sniff"})
+
+rules.append({
     "ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
                 "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
     "outbound": "direct",
-}]
+})
 for n in nodes:
     mode = n.get("NODE_RELAY_MODE") or "direct"
     rtag = n.get("NODE_RELAY_TAG") or ""
