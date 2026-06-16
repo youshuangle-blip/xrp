@@ -10,6 +10,7 @@
 # v4.5 变更：查看/生成节点链接时同时输出 Clash Meta YAML 配置。
 # v4.6 变更：新增 Clash 配置文件生成，减少终端 YAML 输出。
 # v5.0 变更：核心从 Xray 切换为 sing-box，保留原节点/中转数据。
+# v5.1 变更：修复部分系统安装 sing-box 后 PATH 未识别导致无法生成 Reality 密钥。
 
 set -u
 
@@ -20,7 +21,7 @@ DATA_DIR="/usr/local/etc/xray/xrp"
 NODES_DIR="$DATA_DIR/nodes"
 RELAYS_DIR="$DATA_DIR/relays"
 CLASH_DIR="$DATA_DIR/clash"
-PANEL_VER="2026.06.16-v5.0"
+PANEL_VER="2026.06.17-v5.1"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -331,7 +332,18 @@ service_running(){
 }
 
 count_files(){ find "$1" -type f -name '*.env' 2>/dev/null | wc -l | tr -d ' '; }
-core_ver(){ command -v sing-box >/dev/null 2>&1 && sing-box version | head -n1 || echo "未安装"; }
+singbox_bin(){
+  if command -v sing-box >/dev/null 2>&1; then
+    command -v sing-box
+    return 0
+  fi
+  if [ -x /usr/local/bin/sing-box ]; then
+    printf "%s\n" /usr/local/bin/sing-box
+    return 0
+  fi
+  return 1
+}
+core_ver(){ _bin="$(singbox_bin 2>/dev/null)" && "$_bin" version | head -n1 || echo "未安装"; }
 
 get_public_ip(){
   for u in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
@@ -342,12 +354,15 @@ get_public_ip(){
 }
 
 gen_uuid(){
-  if command -v sing-box >/dev/null 2>&1; then sing-box generate uuid 2>/dev/null && return; fi
+  _bin="$(singbox_bin 2>/dev/null || echo /usr/local/bin/sing-box)"
+  if [ -x "$_bin" ]; then "$_bin" generate uuid 2>/dev/null && return; fi
   if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid; else printf "%s-%s-%s-%s-%s\n" "$(rand_hex 4)" "$(rand_hex 2)" "$(rand_hex 2)" "$(rand_hex 2)" "$(rand_hex 6)"; fi
 }
 
 gen_x25519(){
-  KEYPAIR="$(sing-box generate reality-keypair 2>/dev/null || true)"
+  _bin="$(singbox_bin 2>/dev/null || echo /usr/local/bin/sing-box)"
+  [ -x "$_bin" ] || return 1
+  KEYPAIR="$("$_bin" generate reality-keypair 2>/dev/null || true)"
   PRIVATE_KEY="$(printf "%s\n" "$KEYPAIR" | sed -n 's/^PrivateKey:[[:space:]]*//p; s/^Private key:[[:space:]]*//p' | head -n1)"
   PUBLIC_KEY="$(printf "%s\n" "$KEYPAIR" | sed -n 's/^PublicKey:[[:space:]]*//p; s/^Public key:[[:space:]]*//p; s/^Password (PublicKey):[[:space:]]*//p' | head -n1)"
   [ -n "$PRIVATE_KEY" ] && [ -n "$PUBLIC_KEY" ]
@@ -423,16 +438,28 @@ install_singbox(){
   tar -xzf "$TMP/sing-box.tar.gz" -C "$TMP" || { red "解压失败。"; return 1; }
   BIN="$(find "$TMP" -type f -name sing-box | head -n1)"
   [ -n "$BIN" ] || { red "解压后未找到 sing-box。"; return 1; }
-  install -m 755 "$BIN" /usr/local/bin/sing-box
+  mkdir -p /usr/local/bin
+  if command -v install >/dev/null 2>&1; then
+    install -m 755 "$BIN" /usr/local/bin/sing-box || { red "安装 sing-box 到 /usr/local/bin 失败。"; return 1; }
+  else
+    cp "$BIN" /usr/local/bin/sing-box && chmod 755 /usr/local/bin/sing-box || { red "安装 sing-box 到 /usr/local/bin 失败。"; return 1; }
+  fi
+  hash -r 2>/dev/null || true
+  [ -x /usr/local/bin/sing-box ] || { red "/usr/local/bin/sing-box 不存在或不可执行。"; return 1; }
+  /usr/local/bin/sing-box version >/dev/null 2>&1 || {
+    red "sing-box 已下载但无法运行。可能是系统架构不匹配或二进制不兼容。"
+    red "请执行：ls -l /usr/local/bin/sing-box && /usr/local/bin/sing-box version"
+    return 1
+  }
   stop_legacy_xray
   install_service
   green "sing-box 核心安装/更新完成"
-  sing-box version | head -n1
+  /usr/local/bin/sing-box version | head -n1
 }
 
 install_service(){
   INIT="$(detect_init)"
-  CORE_BIN="$(command -v sing-box || echo /usr/local/bin/sing-box)"
+  CORE_BIN="$(singbox_bin 2>/dev/null || echo /usr/local/bin/sing-box)"
   if [ "$INIT" = "systemd" ]; then
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
@@ -472,7 +499,7 @@ EOF
     chmod +x /etc/init.d/sing-box
     rc-update add sing-box default >/dev/null 2>&1 || true
   else
-    yellow "未识别服务管理器，需手动运行：sing-box run -c $CONF_FILE"
+    yellow "未识别服务管理器，需手动运行：$CORE_BIN run -c $CONF_FILE"
   fi
 }
 
@@ -480,7 +507,7 @@ svc_start(){
   INIT="$(detect_init)"
   if [ "$INIT" = "systemd" ]; then systemctl restart sing-box; systemctl status sing-box --no-pager -l
   elif [ "$INIT" = "openrc" ]; then rc-service sing-box restart; rc-service sing-box status
-  else sing-box run -c "$CONF_FILE"; fi
+  else _bin="$(singbox_bin 2>/dev/null || echo sing-box)"; "$_bin" run -c "$CONF_FILE"; fi
 }
 
 svc_stop(){
@@ -1039,7 +1066,7 @@ add_node(){
   _bind_relay_tag="${1:-}"
   _bind_relay_mode="${2:-direct}"
   need_root; init_dirs
-  command -v sing-box >/dev/null 2>&1 || { yellow "未检测到 sing-box，先安装核心。"; install_singbox || return; }
+  singbox_bin >/dev/null 2>&1 || { yellow "未检测到 sing-box，先安装核心。"; install_singbox || return; }
   ensure_python || { red "需要 python3 才能生成配置。"; return; }
   line
   green "添加节点"
@@ -1636,11 +1663,11 @@ PY
 
 apply_config(){
   need_root; init_dirs
-  command -v sing-box >/dev/null 2>&1 || { red "未安装 sing-box 核心。"; return 1; }
+  _bin="$(singbox_bin 2>/dev/null)" || { red "未安装 sing-box 核心。"; return 1; }
   ensure_python || { red "需要 python3。"; return 1; }
   generate_config || return 1
   yellow "正在检查配置..."
-  sing-box check -c "$CONF_FILE" || { red "配置检查失败：$CONF_FILE"; return 1; }
+  "$_bin" check -c "$CONF_FILE" || { red "配置检查失败：$CONF_FILE"; return 1; }
   stop_legacy_xray
   install_service
   svc_start
@@ -1648,14 +1675,14 @@ apply_config(){
 
 # 后台静默应用：成功不打扰，失败必须提示（不再吞掉错误）
 apply_config_silent(){
-  command -v sing-box >/dev/null 2>&1 || return 0
+  _bin="$(singbox_bin 2>/dev/null)" || return 0
   if ! generate_config >/dev/null 2>&1; then
     yellow "⚠ 配置生成失败，本次改动未生效。请用菜单 [13] 应用当前配置 查看详情。"
     return 1
   fi
-  if ! sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
+  if ! "$_bin" check -c "$CONF_FILE" >/dev/null 2>&1; then
     yellow "⚠ 配置校验未通过，本次改动未生效。具体报错请运行："
-    yellow "    sing-box check -c $CONF_FILE"
+    yellow "    $_bin check -c $CONF_FILE"
     return 1
   fi
   stop_legacy_xray >/dev/null 2>&1 || true
@@ -1670,7 +1697,8 @@ apply_config_silent(){
 
 check_config(){
   [ -f "$CONF_FILE" ] || { red "配置文件不存在。"; return; }
-  sing-box check -c "$CONF_FILE"
+  _bin="$(singbox_bin 2>/dev/null)" || { red "未安装 sing-box 核心。"; return 1; }
+  "$_bin" check -c "$CONF_FILE"
 }
 
 boot_manage(){
