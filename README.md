@@ -32,6 +32,7 @@ xrp
 - 支持全部走中转、仅 AI 走中转、AI + 流媒体走中转
 - 自动生成并校验 `/usr/local/etc/xray/config.json`
 - 生成 Clash Meta / mihomo YAML 配置文件，不需要额外开放订阅端口
+- Realm 端口转发管理，支持添加、删除、查看、应用和开机自启服务
 
 ## Clash 配置
 
@@ -51,6 +52,26 @@ xrp
 
 ```sh
 scp root@你的VPS:/usr/local/etc/xray/xrp/clash/all.yaml .
+```
+
+## Realm 转发
+
+菜单选择：
+
+```text
+[19] Realm 转发
+```
+
+可安装/更新 Realm，并添加普通端口转发规则，例如：
+
+```text
+0.0.0.0:公网端口 -> 目标IP:目标端口
+```
+
+Realm 配置默认保存在：
+
+```text
+/usr/local/etc/xray/xrp/realm/config.toml
 ```
 
 ## 卸载
