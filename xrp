@@ -1,16 +1,16 @@
 #!/bin/sh
-# Xray 节点管理面板 v4.8
+# Xray 节点管理面板 v4.9
 # v4.2 变更：config.json 改由 python3 统一生成（消灭手拼 JSON 漏逗号风险，
 #           并减少大量子进程）；apply_config_silent 失败时给出提示而非静默；
 #           监听端口查重（节点间 + 系统占用）；选择项做数字校验；
 #           只缺 python3 时单独安装而非整套重装。
-# v4.3 变更：添加中转时支持解析 ss/socks/vless 节点链接；
-#           添加中转后可直接新增或绑定入站节点并设置中转策略。
+# v4.3 变更：历史版本功能调整。
 # v4.4 变更：新增面板脚本自更新菜单，从 GitHub 拉取最新版 xrp。
 # v4.5 变更：查看/生成节点链接时同时输出 Clash Meta YAML 配置。
 # v4.6 变更：新增 Clash 配置文件生成，减少终端 YAML 输出。
 # v4.7 变更：核心从 sing-box 切回 Xray。
 # v4.8 变更：新增 Realm 端口转发管理。
+# v4.9 变更：新增 SOCKS5 链接输出，精简节点管理。
 
 set -u
 
@@ -19,12 +19,11 @@ CONF_FILE="$CONF_DIR/config.json"
 DAT_DIR="/usr/local/share/xray"
 DATA_DIR="$CONF_DIR/xrp"
 NODES_DIR="$DATA_DIR/nodes"
-RELAYS_DIR="$DATA_DIR/relays"
 CLASH_DIR="$DATA_DIR/clash"
 REALM_DIR="$DATA_DIR/realm"
 REALM_RULES_DIR="$REALM_DIR/rules"
 REALM_CONF="$REALM_DIR/config.toml"
-PANEL_VER="2026.06.18-v4.8"
+PANEL_VER="2026.06.18-v4.9"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -35,7 +34,7 @@ yellow(){ printf "\033[33m%s\033[0m\n" "$*"; }
 line(){ printf "\033[32m%s\033[0m\n" "--------------------------------------------------"; }
 
 need_root(){ [ "$(id -u)" -eq 0 ] || { red "请用 root 运行"; exit 1; }; }
-init_dirs(){ mkdir -p "$CONF_DIR" "$DAT_DIR" "$DATA_DIR" "$NODES_DIR" "$RELAYS_DIR" "$CLASH_DIR" "$REALM_DIR" "$REALM_RULES_DIR"; }
+init_dirs(){ mkdir -p "$CONF_DIR" "$DAT_DIR" "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" "$REALM_DIR" "$REALM_RULES_DIR"; }
 pause(){ printf "\n按回车继续..."; read -r _; }
 
 ask(){
@@ -149,154 +148,6 @@ print(urllib.parse.quote(sys.argv[1], safe=''))
 PY
 }
 
-parse_relay_link(){
-  _link="$1"
-  python3 - "$_link" <<'PY'
-import base64
-import re
-import shlex
-import sys
-import urllib.parse
-
-
-def fail(msg):
-    print(msg, file=sys.stderr)
-    sys.exit(1)
-
-
-def b64_decode(value):
-    value = value.strip()
-    value += "=" * ((4 - len(value) % 4) % 4)
-    try:
-        return base64.urlsafe_b64decode(value.encode()).decode()
-    except Exception as exc:
-        raise ValueError("base64 解码失败") from exc
-
-
-def port_of(parsed):
-    try:
-        return parsed.port
-    except ValueError as exc:
-        raise ValueError("端口格式无效") from exc
-
-
-def clean_name(value, fallback):
-    value = urllib.parse.unquote(value or "")
-    value = re.sub(r"[^A-Za-z0-9._-]", "", value)[:32]
-    return value or fallback
-
-
-def emit(data):
-    keys = [
-        "LINK_RELAY_TYPE", "LINK_NAME", "LINK_SERVER", "LINK_PORT",
-        "LINK_METHOD", "LINK_PASSWORD", "LINK_SOCKS_USER",
-        "LINK_UUID", "LINK_SNI", "LINK_PUBLIC_KEY", "LINK_SHORT_ID",
-        "LINK_FLOW", "LINK_TRANSPORT", "LINK_SECURITY", "LINK_FINGERPRINT",
-        "LINK_WS_HOST", "LINK_WS_PATH", "LINK_SERVICE_NAME", "LINK_ALPN", "LINK_SPIDER_X",
-    ]
-    for key in keys:
-        print(f"{key}={shlex.quote(str(data.get(key, '') or ''))}")
-
-
-link = sys.argv[1].strip()
-parsed = urllib.parse.urlsplit(link)
-scheme = parsed.scheme.lower()
-if not scheme:
-    fail("未识别到链接协议。")
-
-query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-query = {k.lower(): (v[-1] if v else "") for k, v in query.items()}
-
-
-def qget(*names):
-    for name in names:
-        value = query.get(name.lower())
-        if value:
-            return value
-    return ""
-
-
-name = clean_name(parsed.fragment, "")
-
-try:
-    if scheme == "ss":
-        host = parsed.hostname or ""
-        port = port_of(parsed)
-        userinfo = ""
-        method = ""
-        password = ""
-        if host and port and "@" in parsed.netloc:
-            userinfo = urllib.parse.unquote(parsed.netloc.rsplit("@", 1)[0])
-            if ":" in userinfo:
-                method, password = userinfo.split(":", 1)
-            else:
-                method, password = b64_decode(userinfo).split(":", 1)
-        else:
-            token = (parsed.netloc + parsed.path).lstrip("/")
-            decoded = b64_decode(token)
-            if "@" not in decoded:
-                fail("SS 链接缺少服务器地址。")
-            auth, endpoint = decoded.rsplit("@", 1)
-            if ":" not in auth:
-                fail("SS 链接缺少加密方式或密码。")
-            method, password = auth.split(":", 1)
-            endpoint_parsed = urllib.parse.urlsplit("//" + endpoint)
-            host = endpoint_parsed.hostname or ""
-            port = port_of(endpoint_parsed)
-        if not host or not port or not method:
-            fail("SS 链接参数不完整。")
-        emit({
-            "LINK_RELAY_TYPE": "ss",
-            "LINK_NAME": name,
-            "LINK_SERVER": host,
-            "LINK_PORT": port,
-            "LINK_METHOD": urllib.parse.unquote(method),
-            "LINK_PASSWORD": urllib.parse.unquote(password),
-        })
-    elif scheme in ("socks", "socks5", "socks5h"):
-        host = parsed.hostname or ""
-        port = port_of(parsed)
-        if not host or not port:
-            fail("SOCKS 链接缺少地址或端口。")
-        emit({
-            "LINK_RELAY_TYPE": "socks",
-            "LINK_NAME": name,
-            "LINK_SERVER": host,
-            "LINK_PORT": port,
-            "LINK_SOCKS_USER": urllib.parse.unquote(parsed.username or ""),
-            "LINK_PASSWORD": urllib.parse.unquote(parsed.password or ""),
-        })
-    elif scheme == "vless":
-        host = parsed.hostname or ""
-        port = port_of(parsed)
-        uuid = urllib.parse.unquote(parsed.username or "")
-        if not host or not port or not uuid:
-            fail("VLESS 链接缺少 UUID、地址或端口。")
-        emit({
-            "LINK_RELAY_TYPE": "vless",
-            "LINK_NAME": name,
-            "LINK_SERVER": host,
-            "LINK_PORT": port,
-            "LINK_UUID": uuid,
-            "LINK_SNI": qget("sni", "servername", "peer"),
-            "LINK_PUBLIC_KEY": qget("pbk", "publickey"),
-            "LINK_SHORT_ID": qget("sid", "shortid"),
-            "LINK_FLOW": qget("flow"),
-            "LINK_TRANSPORT": qget("type") or "tcp",
-            "LINK_SECURITY": qget("security") or "none",
-            "LINK_FINGERPRINT": qget("fp", "fingerprint"),
-            "LINK_WS_HOST": qget("host"),
-            "LINK_WS_PATH": qget("path"),
-            "LINK_SERVICE_NAME": qget("servicename"),
-            "LINK_ALPN": qget("alpn"),
-            "LINK_SPIDER_X": qget("spx", "spiderx"),
-        })
-    else:
-        fail("暂不支持该链接协议：%s。当前支持 ss://、socks://、socks5://、vless://。" % scheme)
-except ValueError as exc:
-    fail(str(exc))
-PY
-}
 
 shell_quote(){
   printf "%s" "$1" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/"
@@ -398,20 +249,14 @@ ensure_python(){
 reset_node_vars(){
   NODE_ID=""; NODE_TAG=""; NODE_TYPE=""; NODE_NAME=""; PUBLIC_HOST=""; LISTEN_PORT=""; EXT_PORT=""
   SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""
-  NODE_RELAY_MODE="direct"; NODE_RELAY_TAG=""
 }
 
-reset_relay_vars(){
-  RELAY_ID=""; RELAY_TAG=""; RELAY_TYPE=""; RELAY_NAME=""; SERVER=""; PORT=""; METHOD=""; PASSWORD=""; SOCKS_USER=""
-  UUID=""; SNI=""; PUBLIC_KEY=""; SHORT_ID=""; FLOW=""; TRANSPORT=""; SECURITY=""; FINGERPRINT=""; WS_HOST=""; WS_PATH=""; SERVICE_NAME=""; ALPN=""; SPIDER_X=""
-}
 
 reset_realm_vars(){
   REALM_ID=""; REALM_NAME=""; REALM_LISTEN_HOST=""; REALM_LISTEN_PORT=""; REALM_REMOTE_HOST=""; REALM_REMOTE_PORT=""; REALM_REMARK=""
 }
 
 load_node(){ reset_node_vars; . "$1"; }
-load_relay(){ reset_relay_vars; . "$1"; }
 load_realm(){ reset_realm_vars; . "$1"; }
 
 install_deps(){
@@ -707,40 +552,10 @@ write_node(){
     printf "METHOD=%s\n" "$(shell_quote "${METHOD:-}")"
     printf "PASSWORD=%s\n" "$(shell_quote "${PASSWORD:-}")"
     printf "SOCKS_USER=%s\n" "$(shell_quote "${SOCKS_USER:-}")"
-    printf "NODE_RELAY_MODE=%s\n" "$(shell_quote "${NODE_RELAY_MODE:-direct}")"
-    printf "NODE_RELAY_TAG=%s\n" "$(shell_quote "${NODE_RELAY_TAG:-}")"
   } > "$FILE"
   chmod 600 "$FILE"
 }
 
-write_relay(){
-  FILE="$RELAYS_DIR/$RELAY_ID.env"
-  {
-    printf "RELAY_ID=%s\n" "$(shell_quote "$RELAY_ID")"
-    printf "RELAY_TAG=%s\n" "$(shell_quote "$RELAY_TAG")"
-    printf "RELAY_TYPE=%s\n" "$(shell_quote "$RELAY_TYPE")"
-    printf "RELAY_NAME=%s\n" "$(shell_quote "$RELAY_NAME")"
-    printf "SERVER=%s\n" "$(shell_quote "$SERVER")"
-    printf "PORT=%s\n" "$(shell_quote "$PORT")"
-    printf "METHOD=%s\n" "$(shell_quote "${METHOD:-}")"
-    printf "PASSWORD=%s\n" "$(shell_quote "${PASSWORD:-}")"
-    printf "SOCKS_USER=%s\n" "$(shell_quote "${SOCKS_USER:-}")"
-    printf "UUID=%s\n" "$(shell_quote "${UUID:-}")"
-    printf "SNI=%s\n" "$(shell_quote "${SNI:-}")"
-    printf "PUBLIC_KEY=%s\n" "$(shell_quote "${PUBLIC_KEY:-}")"
-    printf "SHORT_ID=%s\n" "$(shell_quote "${SHORT_ID:-}")"
-    printf "FLOW=%s\n" "$(shell_quote "${FLOW:-}")"
-    printf "TRANSPORT=%s\n" "$(shell_quote "${TRANSPORT:-}")"
-    printf "SECURITY=%s\n" "$(shell_quote "${SECURITY:-}")"
-    printf "FINGERPRINT=%s\n" "$(shell_quote "${FINGERPRINT:-}")"
-    printf "WS_HOST=%s\n" "$(shell_quote "${WS_HOST:-}")"
-    printf "WS_PATH=%s\n" "$(shell_quote "${WS_PATH:-}")"
-    printf "SERVICE_NAME=%s\n" "$(shell_quote "${SERVICE_NAME:-}")"
-    printf "ALPN=%s\n" "$(shell_quote "${ALPN:-}")"
-    printf "SPIDER_X=%s\n" "$(shell_quote "${SPIDER_X:-}")"
-  } > "$FILE"
-  chmod 600 "$FILE"
-}
 
 write_realm_rule(){
   FILE="$REALM_RULES_DIR/$REALM_ID.env"
@@ -809,7 +624,13 @@ node_link(){
     b64="$(printf "%s:%s" "$METHOD" "$PASSWORD" | base64 | tr -d '\n')"
     echo "ss://${b64}@${PUBLIC_HOST}:${EXT_PORT}#$(url_encode "$NODE_NAME")"
   else
-    echo "SOCKS5 无统一通用导入链接，请使用手动参数。"
+    _name="$(url_encode "$NODE_NAME")"
+    _auth=""
+    if [ -n "${SOCKS_USER:-}" ]; then
+      _auth="$(url_encode "$SOCKS_USER"):$(url_encode "$PASSWORD")@"
+    fi
+    echo "socks://${_auth}${PUBLIC_HOST}:${EXT_PORT}#${_name}"
+    echo "socks5://${_auth}${PUBLIC_HOST}:${EXT_PORT}#${_name}"
   fi
 }
 
@@ -1206,26 +1027,6 @@ select_node_file(){
   return 0
 }
 
-select_relay_file(){
-  init_dirs
-  files="$(find "$RELAYS_DIR" -type f -name '*.env' 2>/dev/null | sort)"
-  [ -n "$files" ] || { red "暂无中转。"; return 1; }
-  i=1
-  for f in $files; do
-    load_relay "$f"
-    echo " [$i] $RELAY_NAME | $RELAY_TYPE | $SERVER:$PORT"
-    eval "RELAY_FILE_$i=\"$f\""
-    i=$((i+1))
-  done
-  printf "\033[32m请选择中转: \033[0m"
-  read -r n
-  case "$n" in
-    ''|*[!0-9]*) red "选择无效。"; return 1 ;;
-  esac
-  eval "SELECTED_RELAY=\${RELAY_FILE_$n:-}"
-  [ -n "${SELECTED_RELAY:-}" ] || { red "选择无效。"; return 1; }
-  return 0
-}
 
 select_realm_file(){
   init_dirs
@@ -1249,11 +1050,7 @@ select_realm_file(){
 }
 
 add_node(){
-  _bind_relay_tag="${1:-}"
-  _bind_relay_mode="${2:-direct}"
   need_root; init_dirs
-  command -v xray >/dev/null 2>&1 || { yellow "未检测到 Xray，先安装核心。"; install_xray || return; }
-  ensure_python || { red "需要 python3 才能生成配置。"; return; }
   line
   green "添加节点"
   echo " [1] VLESS Reality"
@@ -1263,6 +1060,12 @@ add_node(){
   read -r T
   [ -z "$T" ] && T=1
   echo "已选择：$T"
+  case "$T" in
+    1) command -v xray >/dev/null 2>&1 || { yellow "未检测到 Xray，VLESS Reality 需要先安装核心。"; install_xray || return; } ;;
+    2|3) : ;;
+    *) red "选择无效。"; return ;;
+  esac
+  ensure_python || { red "需要 python3 才能生成配置。"; return; }
   yellow "正在检测服务器公网 IP..."
   DETECT_IP="$(get_public_ip)"
   [ -n "$DETECT_IP" ] && green "检测到公网 IP：$DETECT_IP" || yellow "未检测到公网 IP，请手动输入。"
@@ -1271,11 +1074,6 @@ add_node(){
   PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
   LISTEN_PORT="$(ask_listen_port "服务监听端口" "$(rand_port)")"
   EXT_PORT="$(ask "客户端连接端口" "$LISTEN_PORT")"
-  if [ -n "$_bind_relay_tag" ] && [ "$_bind_relay_mode" != "direct" ]; then
-    NODE_RELAY_MODE="$_bind_relay_mode"; NODE_RELAY_TAG="$_bind_relay_tag"
-  else
-    NODE_RELAY_MODE="direct"; NODE_RELAY_TAG=""
-  fi
   SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""
   case "$T" in
     1)
@@ -1302,10 +1100,9 @@ add_node(){
     *) red "选择无效。"; return ;;
   esac
   write_node
-  if [ -n "$NODE_RELAY_TAG" ]; then
-    green "节点已添加，并已绑定中转 $NODE_RELAY_TAG。"
-  else
-    green "节点已添加，默认本机直出。"
+  green "节点已添加。"
+  if [ "$T" != "1" ] && ! command -v xray >/dev/null 2>&1; then
+    yellow "未安装 Xray，已保存节点和链接；需要 VPS 实际提供入站服务时再安装核心并应用配置。"
   fi
   line
   echo "节点链接/参数："
@@ -1323,14 +1120,7 @@ list_nodes(){
   line; green "节点列表"
   for f in $files; do
     load_node "$f"
-    case "${NODE_RELAY_MODE:-direct}" in
-      direct) mode="本机直出" ;;
-      global) mode="全部走中转 ${NODE_RELAY_TAG:-}" ;;
-      ai) mode="AI 走中转 ${NODE_RELAY_TAG:-}" ;;
-      ai_media) mode="AI+流媒体走中转 ${NODE_RELAY_TAG:-}" ;;
-      *) mode="本机直出" ;;
-    esac
-    echo "- $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT | 监听 $LISTEN_PORT | $mode"
+    echo "- $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT | 监听 $LISTEN_PORT"
   done
 }
 
@@ -1374,6 +1164,8 @@ show_links(){
       echo "加密：$METHOD"
       echo "密码：$PASSWORD"
     else
+      echo "链接："
+      node_link "$f"
       if CLASH_FILE="$(save_node_clash_file "$f")"; then
         echo "Clash 配置文件：$CLASH_FILE"
       fi
@@ -1412,178 +1204,6 @@ change_node_port(){
   apply_config_silent
 }
 
-choose_relay_mode(){
-  echo " [1] 全部走中转"
-  echo " [2] 仅 AI 走中转"
-  echo " [3] AI + 流媒体走中转"
-  printf "\033[32m请选择中转策略 [1]: \033[0m"
-  read -r M
-  [ -z "$M" ] && M=1
-  case "$M" in
-    1) CHOSEN_RELAY_MODE="global" ;;
-    2) CHOSEN_RELAY_MODE="ai" ;;
-    3) CHOSEN_RELAY_MODE="ai_media" ;;
-    *) red "选择无效。"; return 1 ;;
-  esac
-  return 0
-}
-
-bind_relay_after_add(){
-  _relay_tag="$1"
-  echo ""
-  echo "是否现在给这个中转绑定入站节点？"
-  echo " [1] 新增入站节点并使用此中转"
-  echo " [2] 选择已有入站节点使用此中转"
-  echo " [0] 暂不绑定"
-  printf "\033[32m请选择 [0]: \033[0m"
-  read -r B
-  [ -z "$B" ] && B=0
-  case "$B" in
-    1)
-      choose_relay_mode || return
-      add_node "$_relay_tag" "$CHOSEN_RELAY_MODE"
-      ;;
-    2)
-      select_node_file || return
-      NODE_FILE="$SELECTED_NODE"
-      choose_relay_mode || return
-      load_node "$NODE_FILE"
-      NODE_RELAY_TAG="$_relay_tag"
-      NODE_RELAY_MODE="$CHOSEN_RELAY_MODE"
-      write_node
-      green "节点已绑定中转 $_relay_tag。"
-      apply_config_silent
-      ;;
-    0)
-      yellow "已暂不绑定，可稍后在“设置节点中转”中选择。"
-      ;;
-    *) red "选择无效。" ;;
-  esac
-}
-
-add_relay(){
-  init_dirs
-  line; green "添加中转"
-  reset_relay_vars
-  RELAY_ID="$(rand_hex 4)"
-  RELAY_TAG="relay_$RELAY_ID"
-  RELAY_LINK="$(ask "节点链接（可选，支持 ss://、socks://、vless://；留空手动填写）" "")"
-  if [ -n "$RELAY_LINK" ]; then
-    ensure_python || { red "需要 python3 才能解析节点链接。"; return; }
-    PARSED_LINK="$(parse_relay_link "$RELAY_LINK")" || { red "链接解析失败，请检查链接格式。"; return; }
-    eval "$PARSED_LINK"
-    RELAY_TYPE="$LINK_RELAY_TYPE"
-    SERVER="$LINK_SERVER"
-    PORT="$LINK_PORT"
-    METHOD="$LINK_METHOD"
-    PASSWORD="$LINK_PASSWORD"
-    SOCKS_USER="$LINK_SOCKS_USER"
-    UUID="$LINK_UUID"
-    SNI="$LINK_SNI"
-    PUBLIC_KEY="$LINK_PUBLIC_KEY"
-    SHORT_ID="$LINK_SHORT_ID"
-    FLOW="$LINK_FLOW"
-    TRANSPORT="$LINK_TRANSPORT"
-    SECURITY="$LINK_SECURITY"
-    FINGERPRINT="$LINK_FINGERPRINT"
-    WS_HOST="$LINK_WS_HOST"
-    WS_PATH="$LINK_WS_PATH"
-    SERVICE_NAME="$LINK_SERVICE_NAME"
-    ALPN="$LINK_ALPN"
-    SPIDER_X="$LINK_SPIDER_X"
-    DEFAULT_NAME="$RELAY_TYPE-relay-$RELAY_ID"
-    [ -n "${LINK_NAME:-}" ] && DEFAULT_NAME="$(safe_name "$LINK_NAME" "$DEFAULT_NAME")"
-    RELAY_NAME="$(ask_name "名称" "$DEFAULT_NAME")"
-    green "已识别：$RELAY_TYPE $SERVER:$PORT"
-  else
-    echo " [1] Shadowsocks"
-    echo " [2] SOCKS5"
-    printf "\033[32m请选择 [1]: \033[0m"
-    read -r R
-    [ -z "$R" ] && R=1
-    case "$R" in
-      1)
-        RELAY_TYPE="ss"
-        RELAY_NAME="$(ask_name "名称" "ss-relay-$RELAY_ID")"
-        SERVER="$(ask_required "SS 地址/IP" "")"
-        PORT="$(ask_required "SS 端口" "")"
-        echo "常用加密：chacha20-ietf-poly1305 / aes-128-gcm / aes-256-gcm"
-        METHOD="$(ask "SS 加密方式" "chacha20-ietf-poly1305")"
-        PASSWORD="$(ask_required "SS 密码" "")"
-        ;;
-      2)
-        RELAY_TYPE="socks"
-        RELAY_NAME="$(ask_name "名称" "socks-relay-$RELAY_ID")"
-        SERVER="$(ask_required "SOCKS5 地址/IP" "")"
-        PORT="$(ask_required "SOCKS5 端口" "")"
-        SOCKS_USER="$(ask_name "SOCKS5 用户名，没有就直接回车" "")"
-        [ -n "$SOCKS_USER" ] && PASSWORD="$(ask_required "SOCKS5 密码" "")" || PASSWORD=""
-        ;;
-      *) red "选择无效。"; return ;;
-    esac
-  fi
-  write_relay
-  green "中转已添加。"
-  bind_relay_after_add "$RELAY_TAG"
-}
-
-list_relays(){
-  init_dirs
-  files="$(find "$RELAYS_DIR" -type f -name '*.env' 2>/dev/null | sort)"
-  [ -n "$files" ] || { red "暂无中转。"; return; }
-  line; green "中转列表"
-  for f in $files; do load_relay "$f"; echo "- $RELAY_NAME | $RELAY_TYPE | $SERVER:$PORT | tag=$RELAY_TAG"; done
-}
-
-delete_relay(){
-  select_relay_file || return
-  load_relay "$SELECTED_RELAY"
-  printf "确认删除中转 %s？输入 yes 确认: " "$RELAY_NAME"
-  read -r C
-  [ "$C" = "yes" ] || { yellow "已取消"; return; }
-  OLD_RELAY_TAG="$RELAY_TAG"
-  rm -f "$SELECTED_RELAY"
-  for nf in "$NODES_DIR"/*.env; do
-    [ -f "$nf" ] || continue
-    load_node "$nf"
-    if [ "${NODE_RELAY_TAG:-}" = "$OLD_RELAY_TAG" ]; then
-      NODE_RELAY_MODE="direct"; NODE_RELAY_TAG=""
-      write_node
-    fi
-  done
-  green "已删除中转，并将相关节点恢复本机直出。"
-  apply_config_silent
-}
-
-set_node_relay(){
-  select_node_file || return
-  NODE_FILE="$SELECTED_NODE"
-  load_node "$NODE_FILE"
-  echo " [1] 本机直出"
-  echo " [2] 全部走中转"
-  echo " [3] 仅 AI 走中转"
-  echo " [4] AI + 流媒体走中转"
-  printf "\033[32m请选择 [1]: \033[0m"
-  read -r M
-  [ -z "$M" ] && M=1
-  if [ "$M" = "1" ]; then
-    NODE_RELAY_MODE="direct"; NODE_RELAY_TAG=""; write_node; green "已恢复本机直出。"; apply_config_silent; return
-  fi
-  select_relay_file || return
-  load_relay "$SELECTED_RELAY"
-  SELECTED_RELAY_TAG="$RELAY_TAG"
-  load_node "$NODE_FILE"
-  NODE_RELAY_TAG="$SELECTED_RELAY_TAG"
-  case "$M" in
-    2) NODE_RELAY_MODE="global" ;;
-    3) NODE_RELAY_MODE="ai" ;;
-    4) NODE_RELAY_MODE="ai_media" ;;
-    *) red "选择无效。"; return ;;
-  esac
-  write_node
-  green "节点中转策略已保存。"
-  apply_config_silent
-}
 
 generate_realm_config(){
   init_dirs
@@ -1754,33 +1374,6 @@ realm_menu(){
   done
 }
 
-relay_menu(){
-  while true; do
-    clear
-    printf "\033[32m"
-    echo "中转管理"
-    echo "--------------------------------------------------"
-    echo " [1] 添加中转"
-    echo " [2] 查看中转"
-    echo " [3] 删除中转"
-    echo " [4] 设置节点中转"
-    echo " [5] 关闭节点中转"
-    echo " [0] 返回"
-    echo "--------------------------------------------------"
-    printf "请选择: "
-    printf "\033[0m"
-    read -r C
-    case "$C" in
-      1) add_relay; pause ;;
-      2) list_relays; pause ;;
-      3) delete_relay; pause ;;
-      4) set_node_relay; pause ;;
-      5) select_node_file && { load_node "$SELECTED_NODE"; NODE_RELAY_MODE="direct"; NODE_RELAY_TAG=""; write_node; green "已关闭该节点中转。"; apply_config_silent; }; pause ;;
-      0) return ;;
-      *) red "无效选择"; pause ;;
-    esac
-  done
-}
 
 # 由 python3 读取所有 .env，一次性生成合法 config.json
 generate_config(){
@@ -1789,24 +1382,10 @@ generate_config(){
   [ -n "$nodes" ] || { red "暂无节点，请先添加节点。"; return 1; }
   ensure_python || { red "需要 python3 生成配置。"; return 1; }
   TMP="$CONF_FILE.tmp"
-  python3 - "$NODES_DIR" "$RELAYS_DIR" > "$TMP" <<'PY'
+  python3 - "$NODES_DIR" > "$TMP" <<'PY'
 import sys, os, glob, shlex, json
 
-NODES_DIR, RELAYS_DIR = sys.argv[1], sys.argv[2]
-
-AI_DOMAINS = [
-    "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com", "auth0.com",
-    "anthropic.com", "claude.ai", "gemini.google.com", "aistudio.google.com", "ai.google.dev",
-    "generativelanguage.googleapis.com", "makersuite.google.com", "perplexity.ai", "poe.com",
-]
-MEDIA_DOMAINS = [
-    "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com",
-    "netflix.com", "nflxvideo.net", "nflximg.net", "nflxext.com", "nflxso.net",
-    "disneyplus.com", "disney-plus.net", "bamgrid.com", "dssott.com",
-    "primevideo.com", "amazonvideo.com", "media-amazon.com",
-    "hulu.com", "hbomax.com", "max.com", "spotify.com", "scdn.co",
-    "reddit.com", "redd.it", "tiktok.com", "tiktokcdn.com",
-]
+NODES_DIR = sys.argv[1]
 
 
 def parse_env(path):
@@ -1836,68 +1415,7 @@ def to_int(v):
         return 0
 
 
-def split_csv(value):
-    return [item.strip() for item in (value or "").split(",") if item.strip()]
-
-
-def relay_stream_settings(r):
-    network = (r.get("TRANSPORT") or "tcp").lower()
-    if network == "raw":
-        network = "tcp"
-    security = (r.get("SECURITY") or "none").lower()
-    stream = {"network": network}
-    if security and security != "none":
-        stream["security"] = security
-    if security == "reality":
-        reality = {}
-        if r.get("SNI"):
-            reality["serverName"] = r.get("SNI")
-        if r.get("FINGERPRINT"):
-            reality["fingerprint"] = r.get("FINGERPRINT")
-        if r.get("PUBLIC_KEY"):
-            reality["publicKey"] = r.get("PUBLIC_KEY")
-        if r.get("SHORT_ID"):
-            reality["shortId"] = r.get("SHORT_ID")
-        if r.get("SPIDER_X"):
-            reality["spiderX"] = r.get("SPIDER_X")
-        stream["realitySettings"] = reality
-    elif security == "tls":
-        tls = {}
-        if r.get("SNI"):
-            tls["serverName"] = r.get("SNI")
-        if r.get("FINGERPRINT"):
-            tls["fingerprint"] = r.get("FINGERPRINT")
-        alpn = split_csv(r.get("ALPN"))
-        if alpn:
-            tls["alpn"] = alpn
-        stream["tlsSettings"] = tls
-    if network == "ws":
-        ws = {}
-        if r.get("WS_PATH"):
-            ws["path"] = r.get("WS_PATH")
-        if r.get("WS_HOST"):
-            ws["headers"] = {"Host": r.get("WS_HOST")}
-        if ws:
-            stream["wsSettings"] = ws
-    elif network == "grpc":
-        grpc = {}
-        if r.get("SERVICE_NAME"):
-            grpc["serviceName"] = r.get("SERVICE_NAME")
-        if grpc:
-            stream["grpcSettings"] = grpc
-    elif network in ("h2", "http"):
-        http = {}
-        if r.get("WS_HOST"):
-            http["host"] = [r.get("WS_HOST")]
-        if r.get("WS_PATH"):
-            http["path"] = r.get("WS_PATH")
-        if http:
-            stream["httpSettings"] = http
-    return stream
-
-
 nodes = load_dir(NODES_DIR)
-relays = load_dir(RELAYS_DIR)
 
 inbounds = []
 for n in nodes:
@@ -1954,42 +1472,6 @@ outbounds = [
     {"protocol": "freedom", "tag": "direct", "settings": {}},
     {"protocol": "blackhole", "tag": "block", "settings": {}},
 ]
-for r in relays:
-    t = r.get("RELAY_TYPE")
-    if t == "ss":
-        outbounds.append({
-            "protocol": "shadowsocks",
-            "tag": r.get("RELAY_TAG"),
-            "settings": {"servers": [{
-                "address": r.get("SERVER"),
-                "port": to_int(r.get("PORT")),
-                "method": r.get("METHOD"),
-                "password": r.get("PASSWORD"),
-            }]},
-        })
-    elif t == "socks":
-        srv = {"address": r.get("SERVER"), "port": to_int(r.get("PORT"))}
-        if r.get("SOCKS_USER"):
-            srv["users"] = [{"user": r.get("SOCKS_USER"), "pass": r.get("PASSWORD")}]
-        outbounds.append({
-            "protocol": "socks",
-            "tag": r.get("RELAY_TAG"),
-            "settings": {"servers": [srv]},
-        })
-    elif t == "vless":
-        user = {"id": r.get("UUID"), "encryption": "none"}
-        if r.get("FLOW"):
-            user["flow"] = r.get("FLOW")
-        outbounds.append({
-            "protocol": "vless",
-            "tag": r.get("RELAY_TAG"),
-            "settings": {"vnext": [{
-                "address": r.get("SERVER"),
-                "port": to_int(r.get("PORT")),
-                "users": [user],
-            }]},
-            "streamSettings": relay_stream_settings(r),
-        })
 
 rules = [{
     "type": "field",
@@ -1997,21 +1479,6 @@ rules = [{
            "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
     "outboundTag": "direct",
 }]
-for n in nodes:
-    mode = n.get("NODE_RELAY_MODE") or "direct"
-    rtag = n.get("NODE_RELAY_TAG") or ""
-    tag = n.get("NODE_TAG")
-    if mode == "direct" or not rtag:
-        continue
-    if mode == "global":
-        rules.append({"type": "field", "inboundTag": [tag], "outboundTag": rtag})
-    elif mode == "ai":
-        rules.append({"type": "field", "inboundTag": [tag],
-                      "domain": ["domain:" + d for d in AI_DOMAINS], "outboundTag": rtag})
-    elif mode == "ai_media":
-        rules.append({"type": "field", "inboundTag": [tag],
-                      "domain": ["domain:" + d for d in AI_DOMAINS + MEDIA_DOMAINS],
-                      "outboundTag": rtag})
 
 config = {
     "log": {"loglevel": "warning"},
@@ -2173,7 +1640,6 @@ menu(){
   echo " [17] 更新面板脚本"
   echo ""
   echo "【进阶功能】"
-  echo " [16] 中转管理"
   echo " [18] 生成 Clash 配置文件"
   echo " [19] Realm 转发"
   echo ""
@@ -2203,7 +1669,6 @@ while true; do
     13) apply_config; pause ;;
     14) install_xray; pause ;;
     15) uninstall_panel; pause ;;
-    16) relay_menu; pause ;;
     17) update_panel; pause ;;
     18) generate_clash_files_menu; pause ;;
     19) realm_menu; pause ;;

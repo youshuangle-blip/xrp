@@ -1,6 +1,6 @@
 # XRP
 
-Xray 节点管理面板，支持添加入站节点、中转出站、路由策略和一键生成 Xray 配置。
+Xray 节点管理面板，支持添加入站节点、生成节点链接、生成 Clash 配置和 Realm 端口转发。
 
 ## 一键安装
 
@@ -26,10 +26,8 @@ xrp
 
 - 安装/更新 Xray 核心
 - 添加 VLESS Reality、Shadowsocks、SOCKS5 入站节点
-- 添加 Shadowsocks、SOCKS5、VLESS 中转出站
-- 添加中转时支持粘贴 `ss://`、`socks://`、`socks5://`、`vless://` 链接自动识别
-- 添加中转后可直接新增或绑定入站节点
-- 支持全部走中转、仅 AI 走中转、AI + 流媒体走中转
+- 查看 VLESS、Shadowsocks、SOCKS5 节点导入链接
+- 添加 Shadowsocks、SOCKS5 节点时不强制安装 Xray；需要实际启动 VPS 入站服务时再安装核心并应用配置
 - 自动生成并校验 `/usr/local/etc/xray/config.json`
 - 生成 Clash Meta / mihomo YAML 配置文件，不需要额外开放订阅端口
 - Realm 端口转发管理，支持添加、删除、查看、应用和开机自启服务
