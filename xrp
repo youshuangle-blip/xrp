@@ -19,7 +19,7 @@ CORE_ROUTES_DIR="$DATA_DIR/core-routes"
 REALM_DIR="$DATA_DIR/realm"
 REALM_RULES_DIR="$REALM_DIR/rules"
 REALM_CONF="$REALM_DIR/config.toml"
-PANEL_VER="2026.06.19-v5.0"
+PANEL_VER="2026.06.19-v5.1"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -2078,7 +2078,8 @@ update_panel(){
   install -m 755 "$TMP" "$TARGET" || { rm -f "$TMP"; red "安装更新失败：$TARGET"; return 1; }
   rm -f "$TMP"
   green "面板已更新：$TARGET"
-  yellow "请退出后重新运行 xrp 使用新版本。"
+  yellow "正在重启并进入新版面板..."
+  exec "$TARGET"
 }
 
 uninstall_panel(){
@@ -2165,7 +2166,7 @@ main(){
       9) svc_logs; pause ;;
       14) install_xray; pause ;;
       15) uninstall_panel; pause ;;
-      17) update_panel; pause ;;
+      17) update_panel ;;
       18) generate_clash_files_menu; pause ;;
       19) realm_menu; pause ;;
       20) install_singbox; pause ;;

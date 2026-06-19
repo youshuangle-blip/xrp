@@ -16,7 +16,7 @@ wget -qO- https://raw.githubusercontent.com/youshuangle-blip/xrp/main/install.sh
 
 ## 使用
 
-安装后直接运行：
+安装完成后会自动进入面板。之后需要再次打开时运行：
 
 ```sh
 xrp

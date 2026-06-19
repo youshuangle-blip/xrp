@@ -37,4 +37,9 @@ need_root
 yellow "正在安装 XRP 面板..."
 download
 green "安装完成。"
-green "现在可以执行：xrp"
+yellow "正在进入 XRP 面板..."
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  exec "$BIN" </dev/tty >/dev/tty 2>&1
+else
+  exec "$BIN"
+fi
