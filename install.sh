@@ -3,7 +3,8 @@ set -eu
 
 REPO="youshuangle-blip/xrp"
 BRANCH="${XRP_BRANCH:-main}"
-URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/xrp"
+CACHE_BUST="${XRP_CACHE_BUST:-$(date +%s 2>/dev/null || echo $$)}"
+URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/xrp?v=${CACHE_BUST}"
 BIN="/usr/local/bin/xrp"
 
 red(){ printf "\033[31m%s\033[0m\n" "$*"; }

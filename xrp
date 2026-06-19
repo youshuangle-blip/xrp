@@ -19,7 +19,7 @@ CORE_ROUTES_DIR="$DATA_DIR/core-routes"
 REALM_DIR="$DATA_DIR/realm"
 REALM_RULES_DIR="$REALM_DIR/rules"
 REALM_CONF="$REALM_DIR/config.toml"
-PANEL_VER="2026.06.19-v5.3"
+PANEL_VER="2026.06.19-v5.4"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -2060,12 +2060,14 @@ update_panel(){
   TMP="/tmp/xrp-panel-update.$$"
   TARGET="$(command -v xrp 2>/dev/null || true)"
   [ -n "$TARGET" ] || TARGET="/usr/local/bin/xrp"
+  CACHE_BUST="$(date +%s 2>/dev/null || echo $$)"
+  DOWNLOAD_URL="${PANEL_RAW_URL}?v=${CACHE_BUST}"
   yellow "当前版本：$PANEL_VER"
   yellow "正在从 GitHub 下载最新版面板..."
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$PANEL_RAW_URL" -o "$TMP" || { rm -f "$TMP"; red "下载失败：$PANEL_RAW_URL"; return 1; }
+    curl -fsSL -H "Cache-Control: no-cache" "$DOWNLOAD_URL" -o "$TMP" || { rm -f "$TMP"; red "下载失败：$DOWNLOAD_URL"; return 1; }
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$TMP" "$PANEL_RAW_URL" || { rm -f "$TMP"; red "下载失败：$PANEL_RAW_URL"; return 1; }
+    wget -qO "$TMP" "$DOWNLOAD_URL" || { rm -f "$TMP"; red "下载失败：$DOWNLOAD_URL"; return 1; }
   else
     red "需要 curl 或 wget 才能更新面板。"
     return 1
@@ -2075,6 +2077,8 @@ update_panel(){
     red "下载内容异常，已取消更新。"
     return 1
   fi
+  NEW_VER="$(grep '^PANEL_VER=' "$TMP" | head -n1 | cut -d= -f2- | tr -d '"')"
+  [ -n "$NEW_VER" ] && yellow "下载版本：$NEW_VER"
   install -m 755 "$TMP" "$TARGET" || { rm -f "$TMP"; red "安装更新失败：$TARGET"; return 1; }
   rm -f "$TMP"
   green "面板已更新：$TARGET"
