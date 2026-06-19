@@ -15,19 +15,26 @@ need_root(){
 }
 
 download(){
+  TMP="/tmp/xrp-install.$$"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$URL" -o "$BIN"
+    curl -fsSL "$URL" -o "$TMP" || { rm -f "$TMP"; red "下载失败：$URL"; exit 1; }
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$BIN" "$URL"
+    wget -qO "$TMP" "$URL" || { rm -f "$TMP"; red "下载失败：$URL"; exit 1; }
   else
     red "需要 curl 或 wget 才能下载安装。"
     exit 1
   fi
+  if [ ! -s "$TMP" ] || ! head -n1 "$TMP" | grep -q '^#!/bin/sh'; then
+    rm -f "$TMP"
+    red "下载内容异常，已取消安装。"
+    exit 1
+  fi
+  install -m 755 "$TMP" "$BIN"
+  rm -f "$TMP"
 }
 
 need_root
 yellow "正在安装 XRP 面板..."
 download
-chmod +x "$BIN"
 green "安装完成。"
 green "现在可以执行：xrp"

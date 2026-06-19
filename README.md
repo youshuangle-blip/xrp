@@ -1,6 +1,6 @@
 # XRP
 
-Xray 节点管理面板，支持添加入站节点、生成节点链接、生成 Clash 配置和 Realm 端口转发。
+Xray + sing-box 双核心节点管理面板，支持节点管理、核心分流/中转、Clash 配置和 Realm 端口转发。
 
 ## 一键安装
 
@@ -24,13 +24,44 @@ xrp
 
 ## 功能
 
-- 安装/更新 Xray 核心
-- 添加 VLESS Reality、Shadowsocks、SOCKS5 入站节点
-- 查看 VLESS、Shadowsocks、SOCKS5 节点导入链接
-- 添加 Shadowsocks、SOCKS5 节点时不强制安装 Xray；需要实际启动 VPS 入站服务时再安装核心并应用配置
-- 自动生成并校验 `/usr/local/etc/xray/config.json`
+- 安装/更新 Xray 与 sing-box 核心；Alpine 自动使用 musl 版本
+- 添加 VLESS Reality、Shadowsocks、SOCKS5、Hysteria2 入站节点
+- Hysteria2 自动检查 sing-box 最新版本，不存在或版本落后时自动安装/升级
+- 查看四类节点的客户端导入链接
+- 添加 Shadowsocks、SOCKS5 普通节点时不强制安装 Xray
+- 自动生成并用核心校验 `/usr/local/etc/xray/config.json` 和 `/usr/local/etc/sing-box/config.json`
 - 生成 Clash Meta / mihomo YAML 配置文件，不需要额外开放订阅端口
+- 核心分流/中转支持粘贴 VLESS、Shadowsocks、SOCKS5、Hysteria2 链接自动导入出口参数
 - Realm 端口转发管理，支持添加、删除、查看、应用和开机自启服务
+
+配置成功后，Xray、sing-box 和 Realm 服务默认加入开机自启。删除最后一个对应核心节点时，面板会停止并取消该核心的开机自启。
+
+## Hysteria2
+
+菜单添加 Hysteria2 节点时会自动生成自签名 TLS 证书，导入链接和 Clash 配置默认启用跳过证书验证。NAT VPS 需要同时映射所选 UDP 端口。
+
+单独管理 sing-box 核心：
+
+```text
+[20] 安装/更新 sing-box 核心
+```
+
+## 核心分流/中转
+
+菜单选择：
+
+```text
+[21] 核心分流/中转
+```
+
+添加任务时先选择入站协议、填写入站参数，再粘贴出口代理链接。信息全部识别成功后才会安装对应核心并应用配置：
+
+- VLESS、Shadowsocks、SOCKS5 入站使用 Xray
+- Hysteria2 入站使用 sing-box
+- Xray 入站支持 VLESS、Shadowsocks、SOCKS5 出口
+- sing-box 入站支持 VLESS、Shadowsocks、SOCKS5、Hysteria2 出口
+
+配置校验或服务重启失败时，新任务会回滚，不覆盖上一个可用配置。
 
 ## Clash 配置
 

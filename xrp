@@ -1,29 +1,25 @@
 #!/bin/sh
-# Xray 节点管理面板 v4.9
-# v4.2 变更：config.json 改由 python3 统一生成（消灭手拼 JSON 漏逗号风险，
-#           并减少大量子进程）；apply_config_silent 失败时给出提示而非静默；
-#           监听端口查重（节点间 + 系统占用）；选择项做数字校验；
-#           只缺 python3 时单独安装而非整套重装。
-# v4.3 变更：历史版本功能调整。
-# v4.4 变更：新增面板脚本自更新菜单，从 GitHub 拉取最新版 xrp。
-# v4.5 变更：查看/生成节点链接时同时输出 Clash Meta YAML 配置。
-# v4.6 变更：新增 Clash 配置文件生成，减少终端 YAML 输出。
-# v4.7 变更：核心从 sing-box 切回 Xray。
-# v4.8 变更：新增 Realm 端口转发管理。
-# v4.9 变更：新增 SOCKS5 链接输出，精简节点管理。
+# XRP 双核心节点管理面板 v5.0
+# 说明：配置文件由 python3 统一生成并在覆盖前调用核心校验，避免手拼 JSON。
+# 历史功能：Clash 配置生成、Realm 转发、SOCKS5 链接输出。
+# v5.0 变更：新增 Hysteria2、sing-box 管理及核心分流/中转；移除菜单 10-13。
 
 set -u
 
 CONF_DIR="/usr/local/etc/xray"
 CONF_FILE="$CONF_DIR/config.json"
 DAT_DIR="/usr/local/share/xray"
+SINGBOX_CONF_DIR="/usr/local/etc/sing-box"
+SINGBOX_CONF="$SINGBOX_CONF_DIR/config.json"
 DATA_DIR="$CONF_DIR/xrp"
 NODES_DIR="$DATA_DIR/nodes"
 CLASH_DIR="$DATA_DIR/clash"
+CERTS_DIR="$DATA_DIR/certs"
+CORE_ROUTES_DIR="$DATA_DIR/core-routes"
 REALM_DIR="$DATA_DIR/realm"
 REALM_RULES_DIR="$REALM_DIR/rules"
 REALM_CONF="$REALM_DIR/config.toml"
-PANEL_VER="2026.06.18-v4.9"
+PANEL_VER="2026.06.19-v5.0"
 PANEL_REPO="youshuangle-blip/xrp"
 PANEL_BRANCH="${XRP_BRANCH:-main}"
 PANEL_RAW_URL="https://raw.githubusercontent.com/${PANEL_REPO}/${PANEL_BRANCH}/xrp"
@@ -34,7 +30,11 @@ yellow(){ printf "\033[33m%s\033[0m\n" "$*"; }
 line(){ printf "\033[32m%s\033[0m\n" "--------------------------------------------------"; }
 
 need_root(){ [ "$(id -u)" -eq 0 ] || { red "请用 root 运行"; exit 1; }; }
-init_dirs(){ mkdir -p "$CONF_DIR" "$DAT_DIR" "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" "$REALM_DIR" "$REALM_RULES_DIR"; }
+init_dirs(){
+  mkdir -p "$CONF_DIR" "$DAT_DIR" "$SINGBOX_CONF_DIR" "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" \
+    "$CERTS_DIR" "$CORE_ROUTES_DIR" "$REALM_DIR" "$REALM_RULES_DIR"
+  chmod 700 "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" "$CERTS_DIR" "$CORE_ROUTES_DIR" "$REALM_DIR" "$REALM_RULES_DIR" 2>/dev/null || true
+}
 pause(){ printf "\n按回车继续..."; read -r _; }
 
 ask(){
@@ -112,6 +112,10 @@ safe_sni(){
       ;;
   esac
   case "$_raw" in
+    ''|*[!A-Za-z0-9.-]*|.*|*..*|*-|-*|*.)
+      yellow "SNI 格式无效，已恢复默认值：$_def" >&2
+      printf "%s" "$_def"
+      ;;
     *.*) printf "%s" "$_raw" ;;
     *) yellow "SNI 格式不像域名，已恢复默认值：$_def" >&2; printf "%s" "$_def" ;;
   esac
@@ -185,8 +189,20 @@ service_running(){
   fi
 }
 
+singbox_running(){
+  INIT="$(detect_init)"
+  if [ "$INIT" = "systemd" ]; then
+    systemctl is-active --quiet sing-box && echo "已运行" || echo "已停止"
+  elif [ "$INIT" = "openrc" ]; then
+    rc-service sing-box status 2>/dev/null | grep -q started && echo "已运行" || echo "已停止"
+  else
+    pgrep sing-box >/dev/null 2>&1 && echo "已运行" || echo "已停止"
+  fi
+}
+
 count_files(){ find "$1" -type f -name '*.env' 2>/dev/null | wc -l | tr -d ' '; }
 xray_ver(){ command -v xray >/dev/null 2>&1 && xray version | head -n1 || echo "未安装"; }
+singbox_ver(){ command -v sing-box >/dev/null 2>&1 && sing-box version 2>/dev/null | head -n1 || echo "未安装"; }
 realm_ver(){
   if command -v realm >/dev/null 2>&1; then
     _rv="$(realm -v 2>/dev/null || realm --version 2>/dev/null || true)"
@@ -249,14 +265,21 @@ ensure_python(){
 reset_node_vars(){
   NODE_ID=""; NODE_TAG=""; NODE_TYPE=""; NODE_NAME=""; PUBLIC_HOST=""; LISTEN_PORT=""; EXT_PORT=""
   SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""
+  CERT_FILE=""; KEY_FILE=""
 }
 
+reset_core_route_vars(){
+  ROUTE_ID=""; ROUTE_NAME=""; OUT_TYPE=""; OUT_HOST=""; OUT_PORT=""; OUT_NAME=""
+  OUT_UUID=""; OUT_FLOW=""; OUT_SECURITY=""; OUT_SNI=""; OUT_FP=""; OUT_PBK=""; OUT_SID=""
+  OUT_METHOD=""; OUT_PASSWORD=""; OUT_USER=""; OUT_INSECURE=""; OUT_OBFS=""; OUT_OBFS_PASSWORD=""
+}
 
 reset_realm_vars(){
   REALM_ID=""; REALM_NAME=""; REALM_LISTEN_HOST=""; REALM_LISTEN_PORT=""; REALM_REMOTE_HOST=""; REALM_REMOTE_PORT=""; REALM_REMARK=""
 }
 
 load_node(){ reset_node_vars; . "$1"; }
+load_core_route(){ reset_node_vars; reset_core_route_vars; . "$1"; }
 load_realm(){ reset_realm_vars; . "$1"; }
 
 install_deps(){
@@ -286,10 +309,75 @@ arch_name(){
   esac
 }
 
+singbox_arch(){
+  case "$(uname -m)" in
+    x86_64|amd64) echo "amd64" ;;
+    aarch64|arm64) echo "arm64" ;;
+    armv7l|armv7) echo "armv7" ;;
+    i386|i686) echo "386" ;;
+    *) red "sing-box 暂不支持当前架构：$(uname -m)"; return 1 ;;
+  esac
+}
+
+singbox_libc(){
+  if [ -f /etc/alpine-release ] || (ldd --version 2>&1 | grep -qi musl); then
+    echo "musl"
+  else
+    echo "glibc"
+  fi
+}
+
+latest_singbox_version(){
+  curl -fsSL --connect-timeout 12 --max-time 25 --retry 2 \
+    https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null \
+    | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -n1
+}
+
+current_singbox_version(){
+  command -v sing-box >/dev/null 2>&1 || return 0
+  sing-box version 2>/dev/null | sed -n 's/^sing-box version[[:space:]]*//p' | head -n1
+}
+
+install_singbox(){
+  need_root; init_dirs; install_deps
+  ARCH="$(singbox_arch)" || return 1
+  LIBC="$(singbox_libc)"
+  VER="$(latest_singbox_version)"
+  [ -n "$VER" ] || { red "获取 sing-box 最新版本失败，请检查服务器能否访问 GitHub。"; return 1; }
+  TMP="/tmp/xrp-sing-box-install.$$"
+  rm -rf "$TMP"; mkdir -p "$TMP"
+  URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${ARCH}-${LIBC}.tar.gz"
+  yellow "下载：$URL"
+  curl -fL --connect-timeout 20 --max-time 180 --retry 2 "$URL" -o "$TMP/sing-box.tar.gz" || { red "下载失败。"; return 1; }
+  tar -xzf "$TMP/sing-box.tar.gz" -C "$TMP" || { red "解压失败。"; return 1; }
+  BIN="$(find "$TMP" -type f -name sing-box | head -n1)"
+  [ -n "$BIN" ] || { red "解压后未找到 sing-box。"; return 1; }
+  chmod 755 "$BIN"
+  "$BIN" version >/dev/null 2>&1 || { red "下载的 sing-box 无法运行，架构或 libc 不匹配。"; return 1; }
+  install -m 755 "$BIN" /usr/local/bin/sing-box
+  /usr/local/bin/sing-box version >/dev/null 2>&1 || { red "sing-box 安装后无法运行。"; return 1; }
+  rm -rf "$TMP"
+  green "sing-box 核心安装/更新完成：v$VER"
+  apply_core_config sing-box || yellow "核心已更新，但现有 sing-box 配置应用失败，请查看菜单 [8] 状态。"
+}
+
+ensure_singbox_latest(){
+  install_deps
+  LATEST="$(latest_singbox_version)"
+  [ -n "$LATEST" ] || { red "无法查询 sing-box 最新版本，已取消操作。"; return 1; }
+  CURRENT="$(current_singbox_version)"
+  if [ "$CURRENT" != "$LATEST" ]; then
+    [ -n "$CURRENT" ] && yellow "sing-box 当前 v$CURRENT，最新 v$LATEST，开始更新。" || yellow "未安装 sing-box，开始安装 v$LATEST。"
+    install_singbox || return 1
+  else
+    green "sing-box 已是最新版本：v$CURRENT"
+  fi
+}
+
 install_xray(){
   need_root; init_dirs; install_deps
   ARCH="$(arch_name)"
-  TMP="/tmp/xray-install"
+  TMP="/tmp/xrp-xray-install.$$"
   rm -rf "$TMP"; mkdir -p "$TMP"
   yellow "正在获取 Xray 最新版本..."
   API="$(curl -fsSL --connect-timeout 12 --max-time 20 --retry 2 https://api.github.com/repos/XTLS/Xray-core/releases/latest 2>/dev/null || true)"
@@ -304,10 +392,10 @@ install_xray(){
   install -m 755 "$BIN" /usr/local/bin/xray
   [ -f "$TMP/geoip.dat" ] && install -m 644 "$TMP/geoip.dat" "$DAT_DIR/geoip.dat"
   [ -f "$TMP/geosite.dat" ] && install -m 644 "$TMP/geosite.dat" "$DAT_DIR/geosite.dat"
-  stop_legacy_singbox
-  install_service
+  rm -rf "$TMP"
   green "Xray 核心安装/更新完成"
   xray version | head -n1
+  apply_core_config xray || yellow "核心已更新，但现有 Xray 配置应用失败，请查看菜单 [8] 状态。"
 }
 
 realm_arch_patterns(){
@@ -323,7 +411,7 @@ realm_arch_patterns(){
 
 install_realm(){
   need_root; init_dirs; install_deps
-  TMP="/tmp/realm-install"
+  TMP="/tmp/xrp-realm-install.$$"
   rm -rf "$TMP"; mkdir -p "$TMP"
   yellow "正在获取 Realm 最新版本..."
   API_FILE="$TMP/latest.json"
@@ -366,6 +454,7 @@ PY
   [ -n "$BIN" ] || { red "解压后未找到 realm。"; return 1; }
   install -m 755 "$BIN" /usr/local/bin/realm
   /usr/local/bin/realm -v >/dev/null 2>&1 || /usr/local/bin/realm --version >/dev/null 2>&1 || { red "Realm 已下载但无法运行，可能是架构或系统不兼容。"; return 1; }
+  rm -rf "$TMP"
   install_realm_service
   green "Realm 安装/更新完成"
   realm_ver
@@ -417,6 +506,52 @@ EOF
   fi
 }
 
+install_singbox_service(){
+  INIT="$(detect_init)"
+  SINGBOX_BIN="$(command -v sing-box || echo /usr/local/bin/sing-box)"
+  if [ "$INIT" = "systemd" ]; then
+    cat > /etc/systemd/system/sing-box.service <<EOF
+[Unit]
+Description=sing-box Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+ExecStart=$SINGBOX_BIN run -c $SINGBOX_CONF
+Restart=always
+RestartSec=3
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable sing-box >/dev/null 2>&1 || true
+  elif [ "$INIT" = "openrc" ]; then
+    cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+
+name="sing-box"
+description="sing-box Service"
+command="$SINGBOX_BIN"
+command_args="run -c $SINGBOX_CONF"
+command_background=true
+pidfile="/run/sing-box.pid"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+    chmod +x /etc/init.d/sing-box
+    rc-update add sing-box default >/dev/null 2>&1 || true
+  else
+    yellow "未识别服务管理器，需手动运行：sing-box run -c $SINGBOX_CONF"
+  fi
+}
+
 install_realm_service(){
   INIT="$(detect_init)"
   REALM_BIN="$(command -v realm || echo /usr/local/bin/realm)"
@@ -464,9 +599,20 @@ EOF
 
 svc_start(){
   INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then systemctl restart xray; systemctl status xray --no-pager -l
-  elif [ "$INIT" = "openrc" ]; then rc-service xray restart; rc-service xray status
-  else xray run -config "$CONF_FILE"; fi
+  FOUND=0
+  if command -v xray >/dev/null 2>&1 && [ -s "$CONF_FILE" ]; then
+    FOUND=1; install_service
+    if [ "$INIT" = "systemd" ]; then systemctl restart xray
+    elif [ "$INIT" = "openrc" ]; then rc-service xray restart
+    else yellow "请手动运行：xray run -config $CONF_FILE"; fi
+  fi
+  if command -v sing-box >/dev/null 2>&1 && [ -s "$SINGBOX_CONF" ]; then
+    FOUND=1; install_singbox_service
+    if [ "$INIT" = "systemd" ]; then systemctl restart sing-box
+    elif [ "$INIT" = "openrc" ]; then rc-service sing-box restart
+    else yellow "请手动运行：sing-box run -c $SINGBOX_CONF"; fi
+  fi
+  [ "$FOUND" -eq 1 ] || yellow "没有可重启的核心配置。"
 }
 
 realm_start(){
@@ -502,36 +648,40 @@ realm_logs(){
 
 svc_stop(){
   INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then systemctl stop xray
-  elif [ "$INIT" = "openrc" ]; then rc-service xray stop
-  else pkill xray 2>/dev/null || true; fi
+  if [ "$INIT" = "systemd" ]; then
+    systemctl stop xray >/dev/null 2>&1 || true
+    systemctl stop sing-box >/dev/null 2>&1 || true
+  elif [ "$INIT" = "openrc" ]; then
+    rc-service xray stop >/dev/null 2>&1 || true
+    rc-service sing-box stop >/dev/null 2>&1 || true
+  else
+    pkill xray 2>/dev/null || true
+    pkill sing-box 2>/dev/null || true
+  fi
+  green "已停止 Xray/sing-box 服务。"
 }
 
 svc_status(){
   INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then systemctl status xray --no-pager -l
-  elif [ "$INIT" = "openrc" ]; then rc-service xray status; tail -n 30 /var/log/xray.err 2>/dev/null || true
-  else ps | grep xray | grep -v grep || true; fi
+  echo "Xray：$(xray_ver) | 状态：$(service_running)"
+  echo "sing-box：$(singbox_ver) | 状态：$(singbox_running)"
+  if [ "$INIT" = "systemd" ]; then
+    systemctl status xray --no-pager -l 2>/dev/null || true
+    systemctl status sing-box --no-pager -l 2>/dev/null || true
+  elif [ "$INIT" = "openrc" ]; then
+    rc-service xray status 2>/dev/null || true
+    rc-service sing-box status 2>/dev/null || true
+  else ps | grep -E '[x]ray|[s]ing-box' || true; fi
 }
 
 svc_logs(){
   INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then journalctl -u xray --no-pager -n 100
-  elif [ "$INIT" = "openrc" ]; then echo "== /var/log/xray.log =="; tail -n 100 /var/log/xray.log 2>/dev/null || true; echo "== /var/log/xray.err =="; tail -n 100 /var/log/xray.err 2>/dev/null || true
-  else red "未识别日志位置。"; fi
-}
-
-stop_legacy_singbox(){
-  INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then
-    systemctl stop sing-box >/dev/null 2>&1 || true
-    systemctl disable sing-box >/dev/null 2>&1 || true
+  if [ "$INIT" = "systemd" ]; then journalctl -u xray -u sing-box --no-pager -n 150
   elif [ "$INIT" = "openrc" ]; then
-    rc-service sing-box stop >/dev/null 2>&1 || true
-    rc-update del sing-box default >/dev/null 2>&1 || true
-  else
-    pkill sing-box >/dev/null 2>&1 || true
-  fi
+    for f in /var/log/xray.log /var/log/xray.err /var/log/sing-box.log /var/log/sing-box.err; do
+      echo "== $f =="; tail -n 80 "$f" 2>/dev/null || true
+    done
+  else red "未识别日志位置。"; fi
 }
 
 write_node(){
@@ -552,8 +702,67 @@ write_node(){
     printf "METHOD=%s\n" "$(shell_quote "${METHOD:-}")"
     printf "PASSWORD=%s\n" "$(shell_quote "${PASSWORD:-}")"
     printf "SOCKS_USER=%s\n" "$(shell_quote "${SOCKS_USER:-}")"
+    printf "CERT_FILE=%s\n" "$(shell_quote "${CERT_FILE:-}")"
+    printf "KEY_FILE=%s\n" "$(shell_quote "${KEY_FILE:-}")"
   } > "$FILE"
   chmod 600 "$FILE"
+}
+
+write_core_route(){
+  FILE="$CORE_ROUTES_DIR/$ROUTE_ID.env"
+  {
+    printf "ROUTE_ID=%s\n" "$(shell_quote "$ROUTE_ID")"
+    printf "ROUTE_NAME=%s\n" "$(shell_quote "$ROUTE_NAME")"
+    printf "NODE_ID=%s\n" "$(shell_quote "$NODE_ID")"
+    printf "NODE_TAG=%s\n" "$(shell_quote "$NODE_TAG")"
+    printf "NODE_TYPE=%s\n" "$(shell_quote "$NODE_TYPE")"
+    printf "NODE_NAME=%s\n" "$(shell_quote "$NODE_NAME")"
+    printf "PUBLIC_HOST=%s\n" "$(shell_quote "$PUBLIC_HOST")"
+    printf "LISTEN_PORT=%s\n" "$(shell_quote "$LISTEN_PORT")"
+    printf "EXT_PORT=%s\n" "$(shell_quote "$EXT_PORT")"
+    printf "SNI=%s\n" "$(shell_quote "${SNI:-}")"
+    printf "UUID=%s\n" "$(shell_quote "${UUID:-}")"
+    printf "PRIVATE_KEY=%s\n" "$(shell_quote "${PRIVATE_KEY:-}")"
+    printf "PUBLIC_KEY=%s\n" "$(shell_quote "${PUBLIC_KEY:-}")"
+    printf "SHORT_ID=%s\n" "$(shell_quote "${SHORT_ID:-}")"
+    printf "METHOD=%s\n" "$(shell_quote "${METHOD:-}")"
+    printf "PASSWORD=%s\n" "$(shell_quote "${PASSWORD:-}")"
+    printf "SOCKS_USER=%s\n" "$(shell_quote "${SOCKS_USER:-}")"
+    printf "CERT_FILE=%s\n" "$(shell_quote "${CERT_FILE:-}")"
+    printf "KEY_FILE=%s\n" "$(shell_quote "${KEY_FILE:-}")"
+    for _key in OUT_TYPE OUT_HOST OUT_PORT OUT_NAME OUT_UUID OUT_FLOW OUT_SECURITY OUT_SNI OUT_FP OUT_PBK OUT_SID OUT_METHOD OUT_PASSWORD OUT_USER OUT_INSECURE OUT_OBFS OUT_OBFS_PASSWORD; do
+      eval "_value=\${$_key:-}"
+      printf "%s=%s\n" "$_key" "$(shell_quote "$_value")"
+    done
+  } > "$FILE"
+  chmod 600 "$FILE"
+}
+
+generate_hy2_certificate(){
+  _id="$1"; _sni="$2"
+  CERT_FILE="$CERTS_DIR/${_id}.crt"
+  KEY_FILE="$CERTS_DIR/${_id}.key"
+  _cfg="/tmp/xrp-openssl-${_id}.cnf"
+  cat > "$_cfg" <<EOF
+[req]
+distinguished_name=req_dn
+x509_extensions=v3_req
+prompt=no
+[req_dn]
+CN=$_sni
+[v3_req]
+subjectAltName=DNS:$_sni
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+  if ! openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 3650 \
+    -config "$_cfg" -keyout "$KEY_FILE" -out "$CERT_FILE" >/dev/null 2>&1; then
+    rm -f "$_cfg" "$CERT_FILE" "$KEY_FILE"
+    red "生成 Hysteria2 TLS 证书失败。"
+    return 1
+  fi
+  rm -f "$_cfg"
+  chmod 600 "$KEY_FILE" "$CERT_FILE"
 }
 
 
@@ -580,6 +789,12 @@ port_in_use(){
     [ "$nf" = "$_exclude" ] && continue
     _lp="$(. "$nf" 2>/dev/null; printf "%s" "${LISTEN_PORT:-}")"
     [ "$_lp" = "$_p" ] && return 0
+  done
+  for cf in "$CORE_ROUTES_DIR"/*.env; do
+    [ -f "$cf" ] || continue
+    [ "$cf" = "$_exclude" ] && continue
+    _cp="$(. "$cf" 2>/dev/null; printf "%s" "${LISTEN_PORT:-}")"
+    [ "$_cp" = "$_p" ] && return 0
   done
   for rf in "$REALM_RULES_DIR"/*.env; do
     [ -f "$rf" ] || continue
@@ -616,6 +831,16 @@ ask_listen_port(){
   done
 }
 
+ask_port(){
+  _prompt="$1"; _default="$2"
+  while true; do
+    _p="$(ask "$_prompt" "$_default")"
+    case "$_p" in ''|*[!0-9]*) red "端口必须是数字。" >&2; continue ;; esac
+    if [ "$_p" -ge 1 ] && [ "$_p" -le 65535 ]; then printf "%s" "$_p"; return; fi
+    red "端口需在 1-65535。" >&2
+  done
+}
+
 node_link(){
   f="$1"; load_node "$f"
   if [ "$NODE_TYPE" = "vless" ]; then
@@ -623,7 +848,7 @@ node_link(){
   elif [ "$NODE_TYPE" = "ss" ]; then
     b64="$(printf "%s:%s" "$METHOD" "$PASSWORD" | base64 | tr -d '\n')"
     echo "ss://${b64}@${PUBLIC_HOST}:${EXT_PORT}#$(url_encode "$NODE_NAME")"
-  else
+  elif [ "$NODE_TYPE" = "socks" ]; then
     _name="$(url_encode "$NODE_NAME")"
     _auth=""
     if [ -n "${SOCKS_USER:-}" ]; then
@@ -631,6 +856,8 @@ node_link(){
     fi
     echo "socks://${_auth}${PUBLIC_HOST}:${EXT_PORT}#${_name}"
     echo "socks5://${_auth}${PUBLIC_HOST}:${EXT_PORT}#${_name}"
+  elif [ "$NODE_TYPE" = "hy2" ]; then
+    echo "hysteria2://$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&insecure=1#$(url_encode "$NODE_NAME")"
   fi
 }
 
@@ -690,6 +917,17 @@ def proxy_lines(indent="  "):
                 f"{indent}  password: {q(password)}",
             ])
         return lines
+    if node_type == "hy2":
+        return [
+            f"{indent}- name: {q(name)}",
+            f"{indent}  type: hysteria2",
+            f"{indent}  server: {q(server)}",
+            f"{indent}  port: {port}",
+            f"{indent}  password: {q(password)}",
+            f"{indent}  sni: {q(sni)}",
+            f"{indent}  skip-cert-verify: true",
+            f"{indent}  udp: true",
+        ]
     return []
 
 
@@ -729,9 +967,8 @@ generate_clash_file(){
   _node_file="${3:-}"
   ensure_python || { red "需要 python3 才能生成 Clash 配置。"; return 1; }
   init_dirs
-  if [ "$_mode" = "single" ]; then
-    [ -n "$_node_file" ] || { red "未选择节点。"; return 1; }
-    python3 - "$NODES_DIR" "$_mode" "$_node_file" > "$_out" <<'PY'
+  [ "$_mode" != "single" ] || [ -n "$_node_file" ] || { red "未选择节点。"; return 1; }
+  python3 - "$NODES_DIR" "$_mode" "$_node_file" > "$_out" <<'PY'
 import glob
 import os
 import shlex
@@ -807,6 +1044,17 @@ def proxy_lines(node):
                 f"    password: {q(node.get('PASSWORD'))}",
             ])
         return lines
+    if t == "hy2":
+        return [
+            f"  - name: {q(name)}",
+            "    type: hysteria2",
+            f"    server: {q(server)}",
+            f"    port: {port}",
+            f"    password: {q(node.get('PASSWORD'))}",
+            f"    sni: {q(node.get('SNI'))}",
+            "    skip-cert-verify: true",
+            "    udp: true",
+        ]
     return []
 
 
@@ -846,120 +1094,6 @@ out.extend([
 ])
 print("\n".join(out))
 PY
-  else
-    python3 - "$NODES_DIR" "$_mode" "" > "$_out" <<'PY'
-import glob
-import os
-import shlex
-import sys
-
-nodes_dir, mode, node_file = sys.argv[1:4]
-
-
-def parse_env(path):
-    data = {}
-    with open(path, encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.rstrip("\n")
-            if not raw or "=" not in raw:
-                continue
-            key, value = raw.split("=", 1)
-            try:
-                parts = shlex.split(value, posix=True)
-            except ValueError:
-                parts = []
-            data[key] = parts[0] if parts else ""
-    return data
-
-
-def q(value):
-    value = value or ""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def proxy_lines(node):
-    t = node.get("NODE_TYPE")
-    name = node.get("NODE_NAME") or node.get("NODE_TAG") or "xrp-node"
-    server = node.get("PUBLIC_HOST")
-    port = node.get("EXT_PORT")
-    if t == "vless":
-        return [
-            f"  - name: {q(name)}",
-            "    type: vless",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    uuid: {q(node.get('UUID'))}",
-            "    network: tcp",
-            "    tls: true",
-            "    udp: true",
-            "    flow: xtls-rprx-vision",
-            f"    servername: {q(node.get('SNI'))}",
-            "    client-fingerprint: chrome",
-            "    reality-opts:",
-            f"      public-key: {q(node.get('PUBLIC_KEY'))}",
-            f"      short-id: {q(node.get('SHORT_ID'))}",
-        ]
-    if t == "ss":
-        return [
-            f"  - name: {q(name)}",
-            "    type: ss",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    cipher: {q(node.get('METHOD'))}",
-            f"    password: {q(node.get('PASSWORD'))}",
-            "    udp: true",
-        ]
-    if t == "socks":
-        lines = [
-            f"  - name: {q(name)}",
-            "    type: socks5",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            "    udp: true",
-        ]
-        if node.get("SOCKS_USER"):
-            lines.extend([
-                f"    username: {q(node.get('SOCKS_USER'))}",
-                f"    password: {q(node.get('PASSWORD'))}",
-            ])
-        return lines
-    return []
-
-
-nodes = [parse_env(p) for p in sorted(glob.glob(os.path.join(nodes_dir, "*.env")))]
-proxies = []
-names = []
-for node in nodes:
-    lines = proxy_lines(node)
-    if not lines:
-        continue
-    proxies.extend(lines)
-    names.append(node.get("NODE_NAME") or node.get("NODE_TAG") or "xrp-node")
-
-if not proxies:
-    raise SystemExit("no supported nodes")
-
-out = [
-    "mixed-port: 7890",
-    "allow-lan: false",
-    "mode: rule",
-    "log-level: info",
-    "proxies:",
-    *proxies,
-    "proxy-groups:",
-    "  - name: PROXY",
-    "    type: select",
-    "    proxies:",
-]
-out.extend([f"      - {q(name)}" for name in names])
-out.extend([
-    "      - DIRECT",
-    "rules:",
-    "  - MATCH,PROXY",
-])
-print("\n".join(out))
-PY
-  fi
   rc=$?
   if [ "$rc" -ne 0 ] || [ ! -s "$_out" ]; then
     rm -f "$_out"
@@ -1049,6 +1183,140 @@ select_realm_file(){
   return 0
 }
 
+parse_proxy_link(){
+  _link="$1"; _out="$2"
+  [ "${#_link}" -le 4096 ] || { red "代理链接过长。"; return 1; }
+  python3 - "$_link" "$_out" <<'PY'
+import base64
+import re
+import shlex
+import sys
+from urllib.parse import parse_qs, unquote, urlsplit
+
+raw, output = sys.argv[1:3]
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def b64decode(value):
+    value = value.strip().replace("-", "+").replace("_", "/")
+    value += "=" * (-len(value) % 4)
+    try:
+        return base64.b64decode(value).decode("utf-8")
+    except Exception:
+        fail("Base64 内容无效")
+
+
+def valid_host(value):
+    if not value or len(value) > 253 or any(c.isspace() for c in value):
+        return False
+    return bool(re.fullmatch(r"[0-9A-Za-z._:-]+", value))
+
+
+def split_url(value):
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        fail(f"链接地址无效：{exc}")
+    if not valid_host(parsed.hostname) or not port or not 1 <= port <= 65535:
+        fail("链接缺少有效的服务器地址或端口")
+    return parsed, port
+
+
+clean = raw.strip()
+initial = urlsplit(clean)
+scheme = initial.scheme.lower()
+legacy_ss_auth = ""
+if scheme == "ss" and "@" not in initial.netloc:
+    decoded = b64decode(initial.netloc + initial.path)
+    if "@" not in decoded or ":" not in decoded.split("@", 1)[0]:
+        fail("Shadowsocks 链接格式无效")
+    legacy_ss_auth, endpoint = decoded.rsplit("@", 1)
+    u, port = split_url("ss://x@" + endpoint)
+else:
+    u, port = split_url(clean)
+q = {k: values[-1] for k, values in parse_qs(u.query, keep_blank_values=True).items()}
+data = {
+    "OUT_TYPE": "", "OUT_HOST": u.hostname or "", "OUT_PORT": str(port),
+    "OUT_NAME": unquote(initial.fragment) or "imported-proxy", "OUT_UUID": "", "OUT_FLOW": "",
+    "OUT_SECURITY": "", "OUT_SNI": "", "OUT_FP": "", "OUT_PBK": "", "OUT_SID": "",
+    "OUT_METHOD": "", "OUT_PASSWORD": "", "OUT_USER": "", "OUT_INSECURE": "false",
+    "OUT_OBFS": "", "OUT_OBFS_PASSWORD": "",
+}
+
+if scheme == "vless":
+    data.update(
+        OUT_TYPE="vless",
+        OUT_UUID=unquote(u.username or ""),
+        OUT_FLOW=q.get("flow", ""),
+        OUT_SECURITY=q.get("security", "none").lower(),
+        OUT_SNI=q.get("sni", q.get("serverName", "")),
+        OUT_FP=q.get("fp", "chrome"),
+        OUT_PBK=q.get("pbk", ""),
+        OUT_SID=q.get("sid", ""),
+    )
+    if not data["OUT_UUID"]:
+        fail("VLESS 链接缺少 UUID")
+    if q.get("type", "tcp") not in ("tcp", "raw"):
+        fail("当前仅支持 TCP/raw 的 VLESS 出口链接")
+    if data["OUT_SECURITY"] not in ("none", "tls", "reality"):
+        fail("不支持此 VLESS security 参数")
+    if data["OUT_SECURITY"] == "reality" and (not data["OUT_SNI"] or not data["OUT_PBK"]):
+        fail("Reality 链接缺少 SNI 或公钥")
+elif scheme == "ss":
+    data["OUT_TYPE"] = "ss"
+    userinfo = clean.split("//", 1)[1].split("@", 1)[0] if "@" in clean else ""
+    if legacy_ss_auth:
+        method, password = legacy_ss_auth.split(":", 1)
+    elif userinfo:
+        decoded = unquote(userinfo)
+        if ":" not in decoded:
+            decoded = b64decode(decoded)
+        method, password = decoded.split(":", 1)
+    else:
+        fail("Shadowsocks 链接格式无效")
+    if not method or not password:
+        fail("Shadowsocks 链接缺少加密方式或密码")
+    data.update(OUT_METHOD=method, OUT_PASSWORD=password)
+elif scheme in ("socks", "socks5"):
+    data.update(
+        OUT_TYPE="socks",
+        OUT_USER=unquote(u.username or ""),
+        OUT_PASSWORD=unquote(u.password or ""),
+    )
+elif scheme in ("hysteria2", "hy2"):
+    auth = unquote(u.username or "")
+    if u.password is not None:
+        auth += ":" + unquote(u.password)
+    if not auth:
+        fail("Hysteria2 链接缺少认证密码")
+    insecure = q.get("insecure", "0").lower() in ("1", "true", "yes")
+    data.update(
+        OUT_TYPE="hy2",
+        OUT_PASSWORD=auth,
+        OUT_SNI=q.get("sni", u.hostname or ""),
+        OUT_INSECURE="true" if insecure else "false",
+        OUT_OBFS=q.get("obfs", ""),
+        OUT_OBFS_PASSWORD=q.get("obfs-password", q.get("obfs_password", "")),
+    )
+    if data["OUT_OBFS"] not in ("", "salamander"):
+        fail("当前仅支持 Hysteria2 salamander 混淆")
+else:
+    fail("仅支持 vless://、ss://、socks://、socks5://、hysteria2://、hy2:// 链接")
+
+with open(output, "w", encoding="utf-8", newline="\n") as f:
+    for key, value in data.items():
+        f.write(f"{key}={shlex.quote(str(value))}\n")
+PY
+  _rc=$?
+  [ "$_rc" -eq 0 ] && chmod 600 "$_out"
+  return "$_rc"
+}
+
 add_node(){
   need_root; init_dirs
   line
@@ -1056,6 +1324,7 @@ add_node(){
   echo " [1] VLESS Reality"
   echo " [2] Shadowsocks"
   echo " [3] SOCKS5"
+  echo " [4] Hysteria2"
   printf "\033[32m请选择 [1]: \033[0m"
   read -r T
   [ -z "$T" ] && T=1
@@ -1063,6 +1332,7 @@ add_node(){
   case "$T" in
     1) command -v xray >/dev/null 2>&1 || { yellow "未检测到 Xray，VLESS Reality 需要先安装核心。"; install_xray || return; } ;;
     2|3) : ;;
+    4) ensure_singbox_latest || return ;;
     *) red "选择无效。"; return ;;
   esac
   ensure_python || { red "需要 python3 才能生成配置。"; return; }
@@ -1073,8 +1343,8 @@ add_node(){
   NODE_TAG="node_$NODE_ID"
   PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
   LISTEN_PORT="$(ask_listen_port "服务监听端口" "$(rand_port)")"
-  EXT_PORT="$(ask "客户端连接端口" "$LISTEN_PORT")"
-  SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""
+  EXT_PORT="$(ask_port "客户端连接端口" "$LISTEN_PORT")"
+  SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""; CERT_FILE=""; KEY_FILE=""
   case "$T" in
     1)
       NODE_TYPE="vless"
@@ -1097,11 +1367,18 @@ add_node(){
       SOCKS_USER="$(ask_name "用户名" "socks")"
       PASSWORD="$(ask "密码" "$(rand_hex 8)")"
       ;;
+    4)
+      NODE_TYPE="hy2"
+      NODE_NAME="$(ask_name "节点名称" "hy2-$EXT_PORT")"
+      SNI="$(ask_sni "TLS 证书域名/SNI" "www.microsoft.com")"
+      PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
+      generate_hy2_certificate "$NODE_ID" "$SNI" || return
+      ;;
     *) red "选择无效。"; return ;;
   esac
   write_node
   green "节点已添加。"
-  if [ "$T" != "1" ] && ! command -v xray >/dev/null 2>&1; then
+  if { [ "$T" = "2" ] || [ "$T" = "3" ]; } && ! command -v xray >/dev/null 2>&1; then
     yellow "未安装 Xray，已保存节点和链接；需要 VPS 实际提供入站服务时再安装核心并应用配置。"
   fi
   line
@@ -1110,7 +1387,7 @@ add_node(){
   if CLASH_FILE="$(save_node_clash_file "$NODES_DIR/$NODE_ID.env")"; then
     echo "Clash 配置文件：$CLASH_FILE"
   fi
-  apply_config_silent
+  apply_all_configs_silent
 }
 
 list_nodes(){
@@ -1163,7 +1440,7 @@ show_links(){
       echo "协议：Shadowsocks"
       echo "加密：$METHOD"
       echo "密码：$PASSWORD"
-    else
+    elif [ "$NODE_TYPE" = "socks" ]; then
       echo "链接："
       node_link "$f"
       if CLASH_FILE="$(save_node_clash_file "$f")"; then
@@ -1173,6 +1450,17 @@ show_links(){
       echo "协议：SOCKS5"
       echo "用户名：$SOCKS_USER"
       echo "密码：$PASSWORD"
+    else
+      echo "链接："
+      node_link "$f"
+      if CLASH_FILE="$(save_node_clash_file "$f")"; then
+        echo "Clash 配置文件：$CLASH_FILE"
+      fi
+      echo "客户端参数："
+      echo "协议：Hysteria2"
+      echo "认证密码：$PASSWORD"
+      echo "SNI：$SNI"
+      echo "跳过证书验证：是（自签名证书）"
     fi
   done
 }
@@ -1184,8 +1472,10 @@ delete_node(){
   read -r C
   [ "$C" = "yes" ] || { yellow "已取消"; return; }
   rm -f "$SELECTED_NODE"
+  [ -z "${CERT_FILE:-}" ] || rm -f "$CERT_FILE"
+  [ -z "${KEY_FILE:-}" ] || rm -f "$KEY_FILE"
   green "已删除节点。"
-  apply_config_silent
+  apply_all_configs_silent
 }
 
 change_node_port(){
@@ -1193,7 +1483,7 @@ change_node_port(){
   load_node "$SELECTED_NODE"
   _self="$SELECTED_NODE"
   LISTEN_PORT="$(ask_listen_port "服务监听端口" "$LISTEN_PORT" "$_self")"
-  EXT_PORT="$(ask "客户端连接端口" "$EXT_PORT")"
+  EXT_PORT="$(ask_port "客户端连接端口" "$EXT_PORT")"
   write_node
   green "端口已修改。"
   echo "节点链接/参数："
@@ -1201,7 +1491,146 @@ change_node_port(){
   if CLASH_FILE="$(save_node_clash_file "$NODES_DIR/$NODE_ID.env")"; then
     echo "Clash 配置文件：$CLASH_FILE"
   fi
-  apply_config_silent
+  apply_all_configs_silent
+}
+
+select_core_route_file(){
+  init_dirs
+  files="$(find "$CORE_ROUTES_DIR" -type f -name '*.env' 2>/dev/null | sort)"
+  [ -n "$files" ] || { red "暂无核心分流/中转任务。"; return 1; }
+  i=1
+  for f in $files; do
+    load_core_route "$f"
+    echo " [$i] $ROUTE_NAME | 入站 $NODE_TYPE ${PUBLIC_HOST}:${EXT_PORT} -> 出口 $OUT_TYPE ${OUT_HOST}:${OUT_PORT}"
+    eval "CORE_ROUTE_FILE_$i=\"$f\""
+    i=$((i+1))
+  done
+  printf "\033[32m请选择任务: \033[0m"
+  read -r n
+  case "$n" in ''|*[!0-9]*) red "选择无效。"; return 1 ;; esac
+  eval "SELECTED_CORE_ROUTE=\${CORE_ROUTE_FILE_$n:-}"
+  [ -n "${SELECTED_CORE_ROUTE:-}" ] || { red "选择无效。"; return 1; }
+}
+
+add_core_route(){
+  need_root; init_dirs
+  line; green "添加核心分流/中转任务"
+  echo "先完整收集入站和出口信息，确认后才会安装核心并写入配置。"
+  echo " [1] VLESS Reality 入站（Xray）"
+  echo " [2] Shadowsocks 入站（Xray）"
+  echo " [3] SOCKS5 入站（Xray）"
+  echo " [4] Hysteria2 入站（sing-box）"
+  printf "\033[32m请选择 [1]: \033[0m"
+  read -r T; [ -n "$T" ] || T=1
+  case "$T" in 1|2|3|4) : ;; *) red "选择无效。"; return 1 ;; esac
+
+  ensure_python || { red "需要 python3 解析代理链接。"; return 1; }
+  yellow "正在检测服务器公网 IP..."
+  DETECT_IP="$(get_public_ip)"
+  reset_node_vars; reset_core_route_vars
+  ROUTE_ID="$(rand_hex 4)"
+  NODE_ID="$ROUTE_ID"
+  NODE_TAG="route_in_$ROUTE_ID"
+  ROUTE_NAME="$(ask_name "任务名称" "route-$ROUTE_ID")"
+  PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
+  LISTEN_PORT="$(ask_listen_port "入站监听端口" "$(rand_port)")"
+  EXT_PORT="$(ask_port "客户端连接端口" "$LISTEN_PORT")"
+  SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""; CERT_FILE=""; KEY_FILE=""
+  case "$T" in
+    1)
+      NODE_TYPE="vless"; NODE_NAME="$(ask_name "入站节点名称" "vless-$EXT_PORT")"
+      SNI="$(ask_sni "Reality SNI/握手域名" "www.microsoft.com")"; UUID="$(gen_uuid)"; SHORT_ID="$(rand_hex 8)"
+      ;;
+    2)
+      NODE_TYPE="ss"; NODE_NAME="$(ask_name "入站节点名称" "ss-$EXT_PORT")"
+      METHOD="$(ask "加密方式" "chacha20-ietf-poly1305")"; PASSWORD="$(ask "密码" "$(rand_hex 12)")"
+      ;;
+    3)
+      NODE_TYPE="socks"; NODE_NAME="$(ask_name "入站节点名称" "socks-$EXT_PORT")"
+      SOCKS_USER="$(ask_name "用户名" "socks")"; PASSWORD="$(ask "密码" "$(rand_hex 8)")"
+      ;;
+    4)
+      NODE_TYPE="hy2"; NODE_NAME="$(ask_name "入站节点名称" "hy2-$EXT_PORT")"
+      SNI="$(ask_sni "TLS 证书域名/SNI" "www.microsoft.com")"; PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
+      ;;
+  esac
+
+  while true; do
+    OUT_LINK="$(ask_required "粘贴分流/中转出口代理链接" "")"
+    PARSED="/tmp/xrp-proxy-$ROUTE_ID.env"
+    if parse_proxy_link "$OUT_LINK" "$PARSED"; then
+      . "$PARSED"
+      rm -f "$PARSED"
+      if [ "$NODE_TYPE" != "hy2" ] && [ "$OUT_TYPE" = "hy2" ]; then
+        red "Xray 入站不能直接使用 Hysteria2 出口，请换 VLESS/SS/SOCKS5 链接，或选择 Hysteria2 入站。"
+        continue
+      fi
+      break
+    fi
+    rm -f "$PARSED"
+    yellow "代理链接无法识别，请重新粘贴。"
+  done
+  green "已识别出口：$OUT_TYPE | $OUT_HOST:$OUT_PORT | $OUT_NAME"
+
+  if [ "$NODE_TYPE" = "hy2" ]; then
+    ensure_singbox_latest || return 1
+    generate_hy2_certificate "$ROUTE_ID" "$SNI" || return 1
+  else
+    command -v xray >/dev/null 2>&1 || { yellow "未安装 Xray，现在开始安装。"; install_xray || return 1; }
+    if [ "$NODE_TYPE" = "vless" ] && ! gen_x25519; then red "生成 Reality 密钥失败。"; return 1; fi
+  fi
+
+  write_core_route
+  if ! apply_core_for_type "$NODE_TYPE"; then
+    rm -f "$CORE_ROUTES_DIR/$ROUTE_ID.env" "${CERT_FILE:-}" "${KEY_FILE:-}"
+    apply_all_configs_silent >/dev/null 2>&1 || true
+    red "核心配置未通过校验，任务已回滚。"
+    return 1
+  fi
+  green "核心分流/中转任务已创建并启动。"
+  echo "入站链接："
+  node_link "$CORE_ROUTES_DIR/$ROUTE_ID.env"
+}
+
+list_core_routes(){
+  files="$(find "$CORE_ROUTES_DIR" -type f -name '*.env' 2>/dev/null | sort)"
+  [ -n "$files" ] || { yellow "暂无核心分流/中转任务。"; return; }
+  line; green "核心分流/中转任务"
+  for f in $files; do
+    load_core_route "$f"
+    echo "- $ROUTE_NAME | 入站 $NODE_TYPE ${PUBLIC_HOST}:${EXT_PORT} -> 出口 $OUT_TYPE ${OUT_HOST}:${OUT_PORT}"
+    echo "  入站链接："
+    node_link "$f"
+  done
+}
+
+delete_core_route(){
+  select_core_route_file || return
+  load_core_route "$SELECTED_CORE_ROUTE"
+  printf "确认删除任务 %s？输入 yes 确认: " "$ROUTE_NAME"
+  read -r C
+  [ "$C" = "yes" ] || { yellow "已取消。"; return; }
+  rm -f "$SELECTED_CORE_ROUTE" "${CERT_FILE:-}" "${KEY_FILE:-}"
+  apply_all_configs_silent
+  green "任务已删除。"
+}
+
+core_route_menu(){
+  while true; do
+    clear; line; green "核心分流/中转"
+    echo " [1] 添加任务"
+    echo " [2] 查看任务和入站链接"
+    echo " [3] 删除任务"
+    echo " [0] 返回"
+    printf "请选择: "; read -r C
+    case "$C" in
+      1) add_core_route; pause ;;
+      2) list_core_routes; pause ;;
+      3) delete_core_route; pause ;;
+      0) return ;;
+      *) red "无效选择"; pause ;;
+    esac
+  done
 }
 
 
@@ -1375,194 +1804,255 @@ realm_menu(){
 }
 
 
-# 由 python3 读取所有 .env，一次性生成合法 config.json
-generate_config(){
-  init_dirs
-  nodes="$(find "$NODES_DIR" -type f -name '*.env' 2>/dev/null | sort)"
-  [ -n "$nodes" ] || { red "暂无节点，请先添加节点。"; return 1; }
+# 从节点和核心中转任务统一生成 Xray / sing-box 配置。
+generate_core_config(){
+  _core="$1"; _output="$2"
   ensure_python || { red "需要 python3 生成配置。"; return 1; }
-  TMP="$CONF_FILE.tmp"
-  python3 - "$NODES_DIR" > "$TMP" <<'PY'
-import sys, os, glob, shlex, json
+  python3 - "$_core" "$NODES_DIR" "$CORE_ROUTES_DIR" > "$_output" <<'PY'
+import glob
+import json
+import os
+import shlex
+import sys
 
-NODES_DIR = sys.argv[1]
+core, nodes_dir, routes_dir = sys.argv[1:4]
 
 
 def parse_env(path):
-    d = {}
+    data = {}
     with open(path, encoding="utf-8") as f:
         for raw in f:
             raw = raw.rstrip("\n")
             if not raw or "=" not in raw:
                 continue
-            k, v = raw.split("=", 1)
+            key, value = raw.split("=", 1)
             try:
-                parts = shlex.split(v, posix=True)
+                parts = shlex.split(value, posix=True)
             except ValueError:
                 parts = []
-            d[k] = parts[0] if parts else ""
-    return d
+            data[key] = parts[0] if parts else ""
+    return data
 
 
-def load_dir(d):
-    return [parse_env(p) for p in sorted(glob.glob(os.path.join(d, "*.env")))]
+def load_dir(path):
+    return [parse_env(p) for p in sorted(glob.glob(os.path.join(path, "*.env")))]
 
 
-def to_int(v):
+def number(value):
     try:
-        return int(v)
+        return int(value)
     except (TypeError, ValueError):
         return 0
 
 
-nodes = load_dir(NODES_DIR)
-
-inbounds = []
-for n in nodes:
-    t = n.get("NODE_TYPE")
-    inb = {
-        "tag": n.get("NODE_TAG"),
-        "listen": "0.0.0.0",
-        "port": to_int(n.get("LISTEN_PORT")),
+def xray_inbound(node):
+    kind = node.get("NODE_TYPE")
+    inbound = {
+        "tag": node.get("NODE_TAG"), "listen": "0.0.0.0",
+        "port": number(node.get("LISTEN_PORT")),
         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
     }
-    if t == "vless":
-        sni = n.get("SNI")
-        inb["protocol"] = "vless"
-        inb["settings"] = {
-            "clients": [{"id": n.get("UUID"), "flow": "xtls-rprx-vision", "email": n.get("NODE_NAME")}],
-            "decryption": "none",
-        }
-        inb["streamSettings"] = {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-                "show": False,
-                "dest": "%s:443" % sni,
-                "xver": 0,
-                "serverNames": [sni],
-                "privateKey": n.get("PRIVATE_KEY"),
-                "shortIds": [n.get("SHORT_ID")],
-            },
-        }
-    elif t == "ss":
-        inb["protocol"] = "shadowsocks"
-        inb["settings"] = {
-            "method": n.get("METHOD"),
-            "password": n.get("PASSWORD"),
-            "network": "tcp,udp",
-        }
-    elif t == "socks":
-        inb["protocol"] = "socks"
-        user = n.get("SOCKS_USER")
+    if kind == "vless":
+        sni = node.get("SNI")
+        inbound.update(
+            protocol="vless",
+            settings={"clients": [{"id": node.get("UUID"), "flow": "xtls-rprx-vision", "email": node.get("NODE_NAME")}], "decryption": "none"},
+            streamSettings={"network": "tcp", "security": "reality", "realitySettings": {
+                "show": False, "dest": f"{sni}:443", "xver": 0, "serverNames": [sni],
+                "privateKey": node.get("PRIVATE_KEY"), "shortIds": [node.get("SHORT_ID")],
+            }},
+        )
+    elif kind == "ss":
+        inbound.update(protocol="shadowsocks", settings={
+            "method": node.get("METHOD"), "password": node.get("PASSWORD"), "network": "tcp,udp",
+        })
+    elif kind == "socks":
+        user = node.get("SOCKS_USER")
+        settings = {"auth": "noauth", "udp": True, "ip": "0.0.0.0"}
         if user:
-            inb["settings"] = {
-                "auth": "password",
-                "accounts": [{"user": user, "pass": n.get("PASSWORD")}],
-                "udp": True,
-                "ip": "0.0.0.0",
-            }
-        else:
-            inb["settings"] = {"auth": "noauth", "udp": True, "ip": "0.0.0.0"}
+            settings.update(auth="password", accounts=[{"user": user, "pass": node.get("PASSWORD")}])
+        inbound.update(protocol="socks", settings=settings)
     else:
-        continue
-    inbounds.append(inb)
+        return None
+    return inbound
 
-outbounds = [
-    {"protocol": "freedom", "tag": "direct", "settings": {}},
-    {"protocol": "blackhole", "tag": "block", "settings": {}},
-]
 
-rules = [{
-    "type": "field",
-    "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-           "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
-    "outboundTag": "direct",
-}]
+def xray_outbound(route):
+    kind, tag = route.get("OUT_TYPE"), "route_out_" + route.get("ROUTE_ID", "")
+    host, port = route.get("OUT_HOST"), number(route.get("OUT_PORT"))
+    if kind == "vless":
+        user = {"id": route.get("OUT_UUID"), "encryption": "none"}
+        if route.get("OUT_FLOW"):
+            user["flow"] = route.get("OUT_FLOW")
+        outbound = {"protocol": "vless", "tag": tag, "settings": {"vnext": [{"address": host, "port": port, "users": [user]}]}}
+        security = route.get("OUT_SECURITY") or "none"
+        stream = {"network": "tcp", "security": security}
+        if security == "reality":
+            stream["realitySettings"] = {
+                "serverName": route.get("OUT_SNI"), "fingerprint": route.get("OUT_FP") or "chrome",
+                "publicKey": route.get("OUT_PBK"), "shortId": route.get("OUT_SID"), "spiderX": "",
+            }
+        elif security == "tls":
+            stream["tlsSettings"] = {"serverName": route.get("OUT_SNI"), "fingerprint": route.get("OUT_FP") or "chrome"}
+        outbound["streamSettings"] = stream
+        return outbound
+    if kind == "ss":
+        return {"protocol": "shadowsocks", "tag": tag, "settings": {"servers": [{
+            "address": host, "port": port, "method": route.get("OUT_METHOD"), "password": route.get("OUT_PASSWORD"),
+        }]}}
+    if kind == "socks":
+        server = {"address": host, "port": port}
+        if route.get("OUT_USER"):
+            server["users"] = [{"user": route.get("OUT_USER"), "pass": route.get("OUT_PASSWORD")}]
+        return {"protocol": "socks", "tag": tag, "settings": {"servers": [server]}}
+    return None
 
-config = {
-    "log": {"loglevel": "warning"},
-    "inbounds": inbounds,
-    "outbounds": outbounds,
-    "routing": {"domainStrategy": "AsIs", "rules": rules},
-}
+
+def sing_inbound(node):
+    if node.get("NODE_TYPE") != "hy2":
+        return None
+    return {
+        "type": "hysteria2", "tag": node.get("NODE_TAG"), "listen": "0.0.0.0",
+        "listen_port": number(node.get("LISTEN_PORT")),
+        "users": [{"name": node.get("NODE_NAME"), "password": node.get("PASSWORD")}],
+        "tls": {"enabled": True, "server_name": node.get("SNI"),
+                "certificate_path": node.get("CERT_FILE"), "key_path": node.get("KEY_FILE")},
+    }
+
+
+def sing_outbound(route):
+    kind, tag = route.get("OUT_TYPE"), "route_out_" + route.get("ROUTE_ID", "")
+    base = {"type": kind, "tag": tag, "server": route.get("OUT_HOST"), "server_port": number(route.get("OUT_PORT"))}
+    if kind == "vless":
+        base.update(uuid=route.get("OUT_UUID"), flow=route.get("OUT_FLOW"))
+        security = route.get("OUT_SECURITY") or "none"
+        if security in ("tls", "reality"):
+            tls = {"enabled": True, "server_name": route.get("OUT_SNI")}
+            if security == "reality":
+                tls["reality"] = {"enabled": True, "public_key": route.get("OUT_PBK"), "short_id": route.get("OUT_SID")}
+            base["tls"] = tls
+        return base
+    if kind == "ss":
+        base["type"] = "shadowsocks"
+        base.update(method=route.get("OUT_METHOD"), password=route.get("OUT_PASSWORD"))
+        return base
+    if kind == "socks":
+        base.update(version="5")
+        if route.get("OUT_USER"):
+            base.update(username=route.get("OUT_USER"), password=route.get("OUT_PASSWORD"))
+        return base
+    if kind == "hy2":
+        base["type"] = "hysteria2"
+        base["password"] = route.get("OUT_PASSWORD")
+        base["tls"] = {"enabled": True, "server_name": route.get("OUT_SNI"),
+                       "insecure": route.get("OUT_INSECURE") == "true"}
+        if route.get("OUT_OBFS"):
+            base["obfs"] = {"type": route.get("OUT_OBFS"), "password": route.get("OUT_OBFS_PASSWORD")}
+        return base
+    return None
+
+
+nodes, routes = load_dir(nodes_dir), load_dir(routes_dir)
+if core == "xray":
+    inbounds = [item for item in (xray_inbound(n) for n in nodes + routes) if item]
+    if not inbounds:
+        raise SystemExit(3)
+    outbounds = [{"protocol": "freedom", "tag": "direct", "settings": {}}]
+    rules = []
+    for route in routes:
+        if route.get("NODE_TYPE") == "hy2":
+            continue
+        outbound = xray_outbound(route)
+        if outbound:
+            outbounds.append(outbound)
+            rules.append({"type": "field", "inboundTag": [route.get("NODE_TAG")], "outboundTag": outbound["tag"]})
+    config = {"log": {"loglevel": "warning"}, "inbounds": inbounds, "outbounds": outbounds,
+              "routing": {"domainStrategy": "AsIs", "rules": rules}}
+elif core == "sing-box":
+    inbounds = [item for item in (sing_inbound(n) for n in nodes + routes) if item]
+    if not inbounds:
+        raise SystemExit(3)
+    outbounds = [{"type": "direct", "tag": "direct"}]
+    rules = []
+    for route in routes:
+        if route.get("NODE_TYPE") != "hy2":
+            continue
+        outbound = sing_outbound(route)
+        if outbound:
+            outbounds.append(outbound)
+            rules.append({"inbound": [route.get("NODE_TAG")], "action": "route", "outbound": outbound["tag"]})
+    config = {"log": {"level": "warn", "timestamp": True}, "inbounds": inbounds,
+              "outbounds": outbounds, "route": {"rules": rules, "final": "direct"}}
+else:
+    raise SystemExit(2)
+
 json.dump(config, sys.stdout, ensure_ascii=False, indent=2)
 sys.stdout.write("\n")
 PY
-  rc=$?
-  if [ "$rc" -eq 0 ] && [ -s "$TMP" ]; then
-    mv "$TMP" "$CONF_FILE"
+}
+
+stop_core_service(){
+  _core="$1"; INIT="$(detect_init)"
+  if [ "$INIT" = "systemd" ]; then
+    systemctl stop "$_core" >/dev/null 2>&1 || true
+    systemctl disable "$_core" >/dev/null 2>&1 || true
+  elif [ "$INIT" = "openrc" ]; then
+    rc-service "$_core" stop >/dev/null 2>&1 || true
+    rc-update del "$_core" default >/dev/null 2>&1 || true
+  else pkill "$_core" >/dev/null 2>&1 || true; fi
+}
+
+restart_core_service(){
+  _core="$1"; INIT="$(detect_init)"
+  if [ "$_core" = "xray" ]; then install_service >/dev/null 2>&1
+  else install_singbox_service >/dev/null 2>&1; fi
+  if [ "$INIT" = "systemd" ]; then systemctl restart "$_core" >/dev/null 2>&1
+  elif [ "$INIT" = "openrc" ]; then rc-service "$_core" restart >/dev/null 2>&1
+  else return 0; fi
+}
+
+apply_core_config(){
+  _core="$1"
+  if [ "$_core" = "xray" ]; then _target="$CONF_FILE"; _binary="xray"
+  else _target="$SINGBOX_CONF"; _binary="sing-box"; fi
+  command -v "$_binary" >/dev/null 2>&1 || return 0
+  _tmp="${_target}.new.$$"
+  generate_core_config "$_core" "$_tmp"
+  _rc=$?
+  if [ "$_rc" -eq 3 ]; then
+    rm -f "$_tmp" "$_target"
+    stop_core_service "$_core"
     return 0
   fi
-  rm -f "$TMP"
-  red "生成配置失败（python 退出码 $rc）。"
-  return 1
-}
-
-apply_config(){
-  need_root; init_dirs
-  command -v xray >/dev/null 2>&1 || { red "未安装 Xray 核心。"; return 1; }
-  ensure_python || { red "需要 python3。"; return 1; }
-  generate_config || return 1
-  yellow "正在检查配置..."
-  xray run -test -config "$CONF_FILE" || { red "配置检查失败：$CONF_FILE"; return 1; }
-  stop_legacy_singbox
-  install_service
-  svc_start
-}
-
-# 后台静默应用：成功不打扰，失败必须提示（不再吞掉错误）
-apply_config_silent(){
-  command -v xray >/dev/null 2>&1 || return 0
-  if ! generate_config >/dev/null 2>&1; then
-    yellow "⚠ 配置生成失败，本次改动未生效。请用菜单 [13] 应用当前配置 查看详情。"
+  if [ "$_rc" -ne 0 ] || [ ! -s "$_tmp" ]; then
+    rm -f "$_tmp"; red "$_core 配置生成失败。"; return 1
+  fi
+  if [ "$_core" = "xray" ]; then
+    xray run -test -config "$_tmp" >/dev/null 2>&1 || { xray run -test -config "$_tmp"; rm -f "$_tmp"; return 1; }
+  else
+    sing-box check -c "$_tmp" >/dev/null 2>&1 || { sing-box check -c "$_tmp"; rm -f "$_tmp"; return 1; }
+  fi
+  _backup="${_target}.bak"
+  [ ! -f "$_target" ] || cp -p "$_target" "$_backup"
+  mv "$_tmp" "$_target"; chmod 600 "$_target"
+  if ! restart_core_service "$_core"; then
+    if [ -f "$_backup" ]; then mv "$_backup" "$_target"; restart_core_service "$_core" >/dev/null 2>&1 || true; fi
+    red "$_core 重启失败，已尝试恢复上一个配置。"
     return 1
   fi
-  if ! xray run -test -config "$CONF_FILE" >/dev/null 2>&1; then
-    yellow "⚠ 配置校验未通过，本次改动未生效。具体报错请运行："
-    yellow "    xray run -test -config $CONF_FILE"
-    return 1
-  fi
-  stop_legacy_singbox >/dev/null 2>&1 || true
-  install_service >/dev/null 2>&1 || true
-  INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then
-    systemctl restart xray >/dev/null 2>&1 || yellow "⚠ 重启 xray 失败，请用菜单 [8] 查看状态。"
-  elif [ "$INIT" = "openrc" ]; then
-    rc-service xray restart >/dev/null 2>&1 || yellow "⚠ 重启 xray 失败，请用菜单 [8] 查看状态。"
-  fi
+  rm -f "$_backup"
 }
 
-check_config(){
-  [ -f "$CONF_FILE" ] || { red "配置文件不存在。"; return; }
-  xray run -test -config "$CONF_FILE"
+apply_all_configs_silent(){
+  _result=0
+  apply_core_config xray || _result=1
+  apply_core_config sing-box || _result=1
+  return "$_result"
 }
 
-boot_manage(){
-  INIT="$(detect_init)"
-  echo " [1] 开启开机自启"
-  echo " [2] 关闭开机自启"
-  printf "\033[32m请选择: \033[0m"
-  read -r B
-  if [ "$INIT" = "systemd" ]; then
-    [ "$B" = "1" ] && systemctl enable xray || systemctl disable xray
-  elif [ "$INIT" = "openrc" ]; then
-    [ "$B" = "1" ] && rc-update add xray default || rc-update del xray default
-  else
-    red "未识别服务管理器。"
-  fi
-}
-
-sync_time(){
-  if command -v chronyd >/dev/null 2>&1; then
-    chronyc -a makestep 2>/dev/null || true
-  elif command -v ntpd >/dev/null 2>&1; then
-    ntpd -q -p pool.ntp.org 2>/dev/null || true
-  else
-    if command -v apk >/dev/null 2>&1; then apk add --no-cache chrony >/dev/null && rc-service chronyd start 2>/dev/null || true && chronyc -a makestep 2>/dev/null || true
-    elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y chrony && systemctl restart chrony 2>/dev/null || true; fi
-  fi
-  green "已尝试同步系统时间。"
+apply_core_for_type(){
+  if [ "$1" = "hy2" ]; then apply_core_config sing-box
+  else apply_core_config xray; fi
 }
 
 update_panel(){
@@ -1593,7 +2083,7 @@ update_panel(){
 
 uninstall_panel(){
   echo " [1] 仅删除面板"
-  echo " [2] 删除面板 + Xray + 所有配置"
+  echo " [2] 删除面板 + Xray + sing-box + Realm + 所有配置"
   printf "\033[32m请选择: \033[0m"
   read -r U
   if [ "$U" = "1" ]; then
@@ -1605,12 +2095,20 @@ uninstall_panel(){
     [ "$C" = "yes" ] || { yellow "已取消"; return; }
     svc_stop >/dev/null 2>&1 || true
     INIT="$(detect_init)"
-    if [ "$INIT" = "systemd" ]; then systemctl disable xray >/dev/null 2>&1 || true; systemctl disable realm >/dev/null 2>&1 || true; rm -f /etc/systemd/system/xray.service /etc/systemd/system/realm.service; systemctl daemon-reload 2>/dev/null || true
-    elif [ "$INIT" = "openrc" ]; then rc-update del xray default >/dev/null 2>&1 || true; rc-update del realm default >/dev/null 2>&1 || true; rm -f /etc/init.d/xray /etc/init.d/realm; fi
-    rm -f /usr/local/bin/xray /usr/local/bin/realm /usr/local/bin/xrp
-    rm -rf "$CONF_DIR" "$DAT_DIR"
-    rm -f /var/log/xray.log /var/log/xray.err /var/log/realm.log /var/log/realm.err
-    green "已删除面板、Xray 和配置。"
+    if [ "$INIT" = "systemd" ]; then
+      systemctl disable xray sing-box realm >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/xray.service /etc/systemd/system/sing-box.service /etc/systemd/system/realm.service
+      systemctl daemon-reload 2>/dev/null || true
+    elif [ "$INIT" = "openrc" ]; then
+      rc-update del xray default >/dev/null 2>&1 || true
+      rc-update del sing-box default >/dev/null 2>&1 || true
+      rc-update del realm default >/dev/null 2>&1 || true
+      rm -f /etc/init.d/xray /etc/init.d/sing-box /etc/init.d/realm
+    fi
+    rm -f /usr/local/bin/xray /usr/local/bin/sing-box /usr/local/bin/realm /usr/local/bin/xrp
+    rm -rf "$CONF_DIR" "$SINGBOX_CONF_DIR" "$DAT_DIR"
+    rm -f /var/log/xray.log /var/log/xray.err /var/log/sing-box.log /var/log/sing-box.err /var/log/realm.log /var/log/realm.err
+    green "已删除面板、全部核心和配置。"
   else
     yellow "已取消。"
   fi
@@ -1619,10 +2117,11 @@ uninstall_panel(){
 menu(){
   init_dirs
   clear
-  SYS="$(system_name)"; INIT="$(detect_init)"; XR="$(xray_ver)"; RUN="$(service_running)"; NC="$(count_files "$NODES_DIR")"
+  SYS="$(system_name)"; INIT="$(detect_init)"; XR="$(xray_ver)"; RUN="$(service_running)"; SB="$(singbox_ver)"; SBR="$(singbox_running)"; NC="$(count_files "$NODES_DIR")"
   printf "\033[32m"
   echo "系统：$SYS  |  模式：$INIT"
   echo "Xray：$XR  |  状态：$RUN  |  节点：$NC"
+  echo "sing-box：$SB  |  状态：$SBR"
   echo ""
   echo "【节点管理】"
   echo " [1] 添加节点              [2] 查看节点"
@@ -1632,16 +2131,16 @@ menu(){
   echo "【服务控制】"
   echo " [6] 重启服务              [7] 停止服务"
   echo " [8] 查看运行状态          [9] 查看实时日志"
-  echo " [10] 开机重启设置         [11] 同步系统时间"
   echo ""
   echo "【配置与更新】"
-  echo " [12] 检查配置文件         [13] 应用当前配置"
   echo " [14] 安装/更新 Xray 核心  [15] 卸载脚本"
   echo " [17] 更新面板脚本"
+  echo " [20] 安装/更新 sing-box 核心"
   echo ""
   echo "【进阶功能】"
   echo " [18] 生成 Clash 配置文件"
   echo " [19] Realm 转发"
+  echo " [21] 核心分流/中转"
   echo ""
   echo "--------------------------------------------------"
   echo " [0] 退出脚本"
@@ -1649,30 +2148,32 @@ menu(){
   printf "\033[0m"
 }
 
-need_root; init_dirs
-while true; do
-  menu
-  read -r CHOICE
-  case "$CHOICE" in
-    1) add_node; pause ;;
-    2) list_nodes; pause ;;
-    3) show_links; pause ;;
-    4) delete_node; pause ;;
-    5) change_node_port; pause ;;
-    6) apply_config; pause ;;
-    7) svc_stop; pause ;;
-    8) svc_status; pause ;;
-    9) svc_logs; pause ;;
-    10) boot_manage; pause ;;
-    11) sync_time; pause ;;
-    12) check_config; pause ;;
-    13) apply_config; pause ;;
-    14) install_xray; pause ;;
-    15) uninstall_panel; pause ;;
-    17) update_panel; pause ;;
-    18) generate_clash_files_menu; pause ;;
-    19) realm_menu; pause ;;
-    0) exit 0 ;;
-    *) red "无效选择"; pause ;;
-  esac
-done
+main(){
+  need_root; init_dirs
+  while true; do
+    menu
+    read -r CHOICE
+    case "$CHOICE" in
+      1) add_node; pause ;;
+      2) list_nodes; pause ;;
+      3) show_links; pause ;;
+      4) delete_node; pause ;;
+      5) change_node_port; pause ;;
+      6) svc_start; pause ;;
+      7) svc_stop; pause ;;
+      8) svc_status; pause ;;
+      9) svc_logs; pause ;;
+      14) install_xray; pause ;;
+      15) uninstall_panel; pause ;;
+      17) update_panel; pause ;;
+      18) generate_clash_files_menu; pause ;;
+      19) realm_menu; pause ;;
+      20) install_singbox; pause ;;
+      21) core_route_menu ;;
+      0) exit 0 ;;
+      *) red "无效选择"; pause ;;
+    esac
+  done
+}
+
+[ "${XRP_LIB_ONLY:-0}" = "1" ] || main "$@"
