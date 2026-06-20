@@ -864,7 +864,7 @@ node_link(){
   elif [ "$NODE_TYPE" = "hy2" ]; then
     echo "hysteria2://$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&insecure=1#$(url_encode "$NODE_NAME")"
   elif [ "$NODE_TYPE" = "tuic" ]; then
-    echo "tuic://${UUID}:$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$(url_encode "$NODE_NAME")"
+    echo "tuic://${UUID}:$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&alpn=h3&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$(url_encode "$NODE_NAME")"
   fi
 }
 
@@ -1216,6 +1216,7 @@ show_links(){
       echo "UUID：$UUID"
       echo "认证密码：$PASSWORD"
       echo "SNI：$SNI"
+      echo "ALPN：h3"
       echo "拥塞控制：bbr"
       echo "UDP relay：native"
       echo "跳过证书验证：是（自签名证书）"
@@ -1686,6 +1687,7 @@ def sing_inbound(node):
             "users": [{"uuid": node.get("UUID"), "password": node.get("PASSWORD")}],
             "congestion_control": "bbr",
             "tls": {"enabled": True, "server_name": node.get("SNI"),
+                    "alpn": ["h3"],
                     "certificate_path": node.get("CERT_FILE"), "key_path": node.get("KEY_FILE")},
         }
     return None
@@ -1724,6 +1726,7 @@ def sing_outbound(route):
         base.update(uuid=route.get("OUT_UUID"), password=route.get("OUT_PASSWORD"),
                     congestion_control="bbr", udp_relay_mode="native")
         base["tls"] = {"enabled": True, "server_name": route.get("OUT_SNI"),
+                       "alpn": ["h3"],
                        "insecure": route.get("OUT_INSECURE") == "true"}
         return base
     return None

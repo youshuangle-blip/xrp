@@ -37,7 +37,7 @@ xrp
 
 ## Hysteria2 / TUIC
 
-菜单添加 Hysteria2 或 TUIC 节点时会自动生成自签名 TLS 证书，客户端导入链接默认启用跳过证书验证。NAT VPS 需要同时映射所选 UDP 端口。
+菜单添加 Hysteria2 或 TUIC 节点时会自动生成自签名 TLS 证书，客户端导入链接默认启用跳过证书验证。TUIC 默认使用 `ALPN=h3`、`congestion_control=bbr`。NAT VPS 需要同时映射所选 UDP 端口。
 
 单独管理 sing-box 核心：
 
