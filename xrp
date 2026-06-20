@@ -2,7 +2,7 @@
 # shellcheck disable=SC2034
 # XRP 双核心节点管理面板 v5.0
 # 说明：配置文件由 python3 统一生成并在覆盖前调用核心校验，避免手拼 JSON。
-# 历史功能：Clash 配置生成、Realm 转发、SOCKS5 链接输出。
+# 历史功能：Realm 转发、SOCKS5 链接输出。
 # v5.0+ 变更：新增 Hysteria2、sing-box 管理及核心分流/中转；菜单重新按连续数字排列。
 
 set -u
@@ -14,7 +14,6 @@ SINGBOX_CONF_DIR="/usr/local/etc/sing-box"
 SINGBOX_CONF="$SINGBOX_CONF_DIR/config.json"
 DATA_DIR="$CONF_DIR/xrp"
 NODES_DIR="$DATA_DIR/nodes"
-CLASH_DIR="$DATA_DIR/clash"
 CERTS_DIR="$DATA_DIR/certs"
 CORE_ROUTES_DIR="$DATA_DIR/core-routes"
 REALM_DIR="$DATA_DIR/realm"
@@ -32,9 +31,9 @@ line(){ printf "\033[32m%s\033[0m\n" "------------------------------------------
 
 need_root(){ [ "$(id -u)" -eq 0 ] || { red "请用 root 运行"; exit 1; }; }
 init_dirs(){
-  mkdir -p "$CONF_DIR" "$DAT_DIR" "$SINGBOX_CONF_DIR" "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" \
+  mkdir -p "$CONF_DIR" "$DAT_DIR" "$SINGBOX_CONF_DIR" "$DATA_DIR" "$NODES_DIR" \
     "$CERTS_DIR" "$CORE_ROUTES_DIR" "$REALM_DIR" "$REALM_RULES_DIR"
-  chmod 700 "$DATA_DIR" "$NODES_DIR" "$CLASH_DIR" "$CERTS_DIR" "$CORE_ROUTES_DIR" "$REALM_DIR" "$REALM_RULES_DIR" 2>/dev/null || true
+  chmod 700 "$DATA_DIR" "$NODES_DIR" "$CERTS_DIR" "$CORE_ROUTES_DIR" "$REALM_DIR" "$REALM_RULES_DIR" 2>/dev/null || true
 }
 pause(){ printf "\n按回车继续..."; read -r _; }
 
@@ -880,209 +879,6 @@ node_link(){
 }
 
 
-safe_file_name(){
-  _raw="$1"
-  _clean="$(printf "%s" "$_raw" | tr -cd 'A-Za-z0-9._-')"
-  [ -n "$_clean" ] || _clean="node"
-  printf "%s" "$_clean" | cut -c1-32
-}
-
-generate_clash_file(){
-  _mode="$1"
-  _out="$2"
-  _node_file="${3:-}"
-  ensure_python || { red "需要 python3 才能生成 Clash 配置。"; return 1; }
-  init_dirs
-  [ "$_mode" != "single" ] || [ -n "$_node_file" ] || { red "未选择节点。"; return 1; }
-  python3 - "$NODES_DIR" "$_mode" "$_node_file" > "$_out" <<'PY'
-import glob
-import os
-import shlex
-import sys
-
-nodes_dir, mode, node_file = sys.argv[1:4]
-
-
-def parse_env(path):
-    data = {}
-    with open(path, encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.rstrip("\n")
-            if not raw or "=" not in raw:
-                continue
-            key, value = raw.split("=", 1)
-            try:
-                parts = shlex.split(value, posix=True)
-            except ValueError:
-                parts = []
-            data[key] = parts[0] if parts else ""
-    return data
-
-
-def q(value):
-    value = value or ""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def proxy_lines(node):
-    t = node.get("NODE_TYPE")
-    name = node.get("NODE_NAME") or node.get("NODE_TAG") or "xrp-node"
-    server = node.get("PUBLIC_HOST")
-    port = node.get("EXT_PORT")
-    if t == "vless":
-        return [
-            f"  - name: {q(name)}",
-            "    type: vless",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    uuid: {q(node.get('UUID'))}",
-            "    network: tcp",
-            "    tls: true",
-            "    udp: true",
-            "    flow: xtls-rprx-vision",
-            f"    servername: {q(node.get('SNI'))}",
-            "    client-fingerprint: chrome",
-            "    reality-opts:",
-            f"      public-key: {q(node.get('PUBLIC_KEY'))}",
-            f"      short-id: {q(node.get('SHORT_ID'))}",
-        ]
-    if t == "ss":
-        return [
-            f"  - name: {q(name)}",
-            "    type: ss",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    cipher: {q(node.get('METHOD'))}",
-            f"    password: {q(node.get('PASSWORD'))}",
-            "    udp: true",
-        ]
-    if t == "socks":
-        lines = [
-            f"  - name: {q(name)}",
-            "    type: socks5",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            "    udp: true",
-        ]
-        if node.get("SOCKS_USER"):
-            lines.extend([
-                f"    username: {q(node.get('SOCKS_USER'))}",
-                f"    password: {q(node.get('PASSWORD'))}",
-            ])
-        return lines
-    if t == "hy2":
-        return [
-            f"  - name: {q(name)}",
-            "    type: hysteria2",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    password: {q(node.get('PASSWORD'))}",
-            f"    sni: {q(node.get('SNI'))}",
-            "    skip-cert-verify: true",
-            "    udp: true",
-        ]
-    if t == "tuic":
-        return [
-            f"  - name: {q(name)}",
-            "    type: tuic",
-            f"    server: {q(server)}",
-            f"    port: {port}",
-            f"    uuid: {q(node.get('UUID'))}",
-            f"    password: {q(node.get('PASSWORD'))}",
-            f"    sni: {q(node.get('SNI'))}",
-            "    alpn:",
-            "      - h3",
-            "    reduce-rtt: true",
-            "    udp-relay-mode: native",
-            "    congestion-controller: bbr",
-            "    skip-cert-verify: true",
-            "    udp: true",
-        ]
-    return []
-
-
-if mode == "single":
-    nodes = [parse_env(node_file)]
-else:
-    nodes = [parse_env(p) for p in sorted(glob.glob(os.path.join(nodes_dir, "*.env")))]
-proxies = []
-names = []
-for node in nodes:
-    lines = proxy_lines(node)
-    if not lines:
-        continue
-    proxies.extend(lines)
-    names.append(node.get("NODE_NAME") or node.get("NODE_TAG") or "xrp-node")
-
-if not proxies:
-    raise SystemExit("no supported nodes")
-
-out = [
-    "mixed-port: 7890",
-    "allow-lan: false",
-    "mode: rule",
-    "log-level: info",
-    "proxies:",
-    *proxies,
-    "proxy-groups:",
-    "  - name: PROXY",
-    "    type: select",
-    "    proxies:",
-]
-out.extend([f"      - {q(name)}" for name in names])
-out.extend([
-    "      - DIRECT",
-    "rules:",
-    "  - MATCH,PROXY",
-])
-print("\n".join(out))
-PY
-  rc=$?
-  if [ "$rc" -ne 0 ] || [ ! -s "$_out" ]; then
-    rm -f "$_out"
-    red "生成 Clash 配置失败。"
-    return 1
-  fi
-  chmod 600 "$_out"
-}
-
-generate_clash_files_menu(){
-  init_dirs
-  echo " [1] 生成单个节点配置"
-  echo " [2] 生成全部节点配置"
-  printf "\033[32m请选择 [2]: \033[0m"
-  read -r C
-  [ -z "$C" ] && C=2
-  case "$C" in
-    1)
-      select_node_file || return
-      load_node "$SELECTED_NODE"
-      _name="$(safe_file_name "$NODE_NAME")"
-      _out="$CLASH_DIR/${_name}.yaml"
-      generate_clash_file "single" "$_out" "$SELECTED_NODE" || return
-      green "Clash 配置已生成：$_out"
-      ;;
-    2)
-      _out="$CLASH_DIR/all.yaml"
-      generate_clash_file "all" "$_out" "" || return
-      green "Clash 全部节点配置已生成：$_out"
-      ;;
-    *) red "选择无效。"; return ;;
-  esac
-  echo ""
-  echo "下载到本地示例："
-  echo "scp root@你的VPS:$_out ."
-}
-
-save_node_clash_file(){
-  _node_file="$1"
-  load_node "$_node_file"
-  _name="$(safe_file_name "$NODE_NAME")"
-  _out="$CLASH_DIR/${_name}.yaml"
-  generate_clash_file "single" "$_out" "$_node_file" || return 1
-  printf "%s" "$_out"
-}
-
 select_node_file(){
   init_dirs
   files="$(find "$NODES_DIR" -type f -name '*.env' 2>/dev/null | sort)"
@@ -1360,9 +1156,6 @@ add_node(){
   line
   echo "节点链接/参数："
   node_link "$NODES_DIR/$NODE_ID.env"
-  if CLASH_FILE="$(save_node_clash_file "$NODES_DIR/$NODE_ID.env")"; then
-    echo "Clash 配置文件：$CLASH_FILE"
-  fi
   apply_all_configs_silent
 }
 
@@ -1392,9 +1185,6 @@ show_links(){
     if [ "$NODE_TYPE" = "vless" ]; then
       echo "链接："
       node_link "$f"
-      if CLASH_FILE="$(save_node_clash_file "$f")"; then
-        echo "Clash 配置文件：$CLASH_FILE"
-      fi
       echo "客户端参数："
       echo "协议：VLESS"
       echo "UUID：$UUID"
@@ -1409,9 +1199,6 @@ show_links(){
     elif [ "$NODE_TYPE" = "ss" ]; then
       echo "链接："
       node_link "$f"
-      if CLASH_FILE="$(save_node_clash_file "$f")"; then
-        echo "Clash 配置文件：$CLASH_FILE"
-      fi
       echo "客户端参数："
       echo "协议：Shadowsocks"
       echo "加密：$METHOD"
@@ -1419,9 +1206,6 @@ show_links(){
     elif [ "$NODE_TYPE" = "socks" ]; then
       echo "链接："
       node_link "$f"
-      if CLASH_FILE="$(save_node_clash_file "$f")"; then
-        echo "Clash 配置文件：$CLASH_FILE"
-      fi
       echo "客户端参数："
       echo "协议：SOCKS5"
       echo "用户名：$SOCKS_USER"
@@ -1429,9 +1213,6 @@ show_links(){
     elif [ "$NODE_TYPE" = "hy2" ]; then
       echo "链接："
       node_link "$f"
-      if CLASH_FILE="$(save_node_clash_file "$f")"; then
-        echo "Clash 配置文件：$CLASH_FILE"
-      fi
       echo "客户端参数："
       echo "协议：Hysteria2"
       echo "认证密码：$PASSWORD"
@@ -1440,9 +1221,6 @@ show_links(){
     else
       echo "链接："
       node_link "$f"
-      if CLASH_FILE="$(save_node_clash_file "$f")"; then
-        echo "Clash 配置文件：$CLASH_FILE"
-      fi
       echo "客户端参数："
       echo "协议：TUIC"
       echo "UUID：$UUID"
@@ -1478,9 +1256,6 @@ change_node_port(){
   green "端口已修改。"
   echo "节点链接/参数："
   node_link "$NODES_DIR/$NODE_ID.env"
-  if CLASH_FILE="$(save_node_clash_file "$NODES_DIR/$NODE_ID.env")"; then
-    echo "Clash 配置文件：$CLASH_FILE"
-  fi
   apply_all_configs_silent
 }
 
@@ -2158,9 +1933,8 @@ menu(){
   echo " [13] 卸载脚本"
   echo ""
   echo "【进阶功能】"
-  echo " [14] 生成 Clash 配置文件"
-  echo " [15] Realm 转发"
-  echo " [16] 核心分流/中转"
+  echo " [14] Realm 转发"
+  echo " [15] 核心分流/中转"
   echo ""
   echo "--------------------------------------------------"
   echo " [0] 退出脚本"
@@ -2187,9 +1961,8 @@ main(){
       11) install_singbox; pause ;;
       12) update_panel ;;
       13) uninstall_panel; pause ;;
-      14) generate_clash_files_menu; pause ;;
-      15) realm_menu; pause ;;
-      16) core_route_menu ;;
+      14) realm_menu; pause ;;
+      15) core_route_menu ;;
       0) exit 0 ;;
       *) red "无效选择"; pause ;;
     esac
