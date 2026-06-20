@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2034
 # XRP 双核心节点管理面板 v5.0
 # 说明：配置文件由 python3 统一生成并在覆盖前调用核心校验，避免手拼 JSON。
 # 历史功能：Clash 配置生成、Realm 转发、SOCKS5 链接输出。
@@ -72,7 +73,11 @@ ask_required(){
 }
 
 flush_stdin(){
-  while read -r -t 0.05 _junk 2>/dev/null; do :; done || true
+  [ -t 0 ] || return 0
+  _old_stty="$(stty -g 2>/dev/null || true)"
+  stty min 0 time 0 2>/dev/null || return 0
+  while IFS= read -r _junk; do :; done
+  [ -z "$_old_stty" ] || stty "$_old_stty" 2>/dev/null || true
 }
 
 safe_name(){
@@ -171,6 +176,7 @@ system_name(){
   if [ -f /etc/alpine-release ]; then
     echo "Alpine Linux v$(cat /etc/alpine-release)"
   elif [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
     . /etc/os-release
     echo "${PRETTY_NAME:-Linux}"
   else
@@ -270,7 +276,10 @@ reset_node_vars(){
 
 reset_core_route_vars(){
   ROUTE_ID=""; ROUTE_NAME=""; OUT_TYPE=""; OUT_HOST=""; OUT_PORT=""; OUT_NAME=""
+  # These OUT_* fields are populated by sourced route env files and consumed by generated Python config.
+  # shellcheck disable=SC2034
   OUT_UUID=""; OUT_FLOW=""; OUT_SECURITY=""; OUT_SNI=""; OUT_FP=""; OUT_PBK=""; OUT_SID=""
+  # shellcheck disable=SC2034
   OUT_METHOD=""; OUT_PASSWORD=""; OUT_USER=""; OUT_INSECURE=""; OUT_OBFS=""; OUT_OBFS_PASSWORD=""
 }
 
@@ -278,8 +287,11 @@ reset_realm_vars(){
   REALM_ID=""; REALM_NAME=""; REALM_LISTEN_HOST=""; REALM_LISTEN_PORT=""; REALM_REMOTE_HOST=""; REALM_REMOTE_PORT=""; REALM_REMARK=""
 }
 
+# shellcheck disable=SC1090
 load_node(){ reset_node_vars; . "$1"; }
+# shellcheck disable=SC1090
 load_core_route(){ reset_node_vars; reset_core_route_vars; . "$1"; }
+# shellcheck disable=SC1090
 load_realm(){ reset_realm_vars; . "$1"; }
 
 install_deps(){
@@ -367,7 +379,11 @@ ensure_singbox_latest(){
   [ -n "$LATEST" ] || { red "无法查询 sing-box 最新版本，已取消操作。"; return 1; }
   CURRENT="$(current_singbox_version)"
   if [ "$CURRENT" != "$LATEST" ]; then
-    [ -n "$CURRENT" ] && yellow "sing-box 当前 v$CURRENT，最新 v$LATEST，开始更新。" || yellow "未安装 sing-box，开始安装 v$LATEST。"
+    if [ -n "$CURRENT" ]; then
+      yellow "sing-box 当前 v$CURRENT，最新 v$LATEST，开始更新。"
+    else
+      yellow "未安装 sing-box，开始安装 v$LATEST。"
+    fi
     install_singbox || return 1
   else
     green "sing-box 已是最新版本：v$CURRENT"
@@ -417,6 +433,8 @@ install_realm(){
   API_FILE="$TMP/latest.json"
   curl -fsSL --connect-timeout 12 --max-time 20 --retry 2 https://api.github.com/repos/zhboner/realm/releases/latest -o "$API_FILE" 2>/dev/null || { red "获取版本失败，检查服务器网络能否访问 GitHub。"; return 1; }
   PATTERNS="$(realm_arch_patterns)" || return 1
+  # PATTERNS is intentionally split into multiple Python arguments.
+  # shellcheck disable=SC2086
   URL="$(python3 - "$API_FILE" $PATTERNS <<'PY'
 import json, re, sys
 path = sys.argv[1]
@@ -615,15 +633,6 @@ svc_start(){
   [ "$FOUND" -eq 1 ] || yellow "没有可重启的核心配置。"
 }
 
-realm_start(){
-  command -v realm >/dev/null 2>&1 || { red "未安装 Realm。"; return 1; }
-  [ -f "$REALM_CONF" ] || { red "Realm 配置不存在，请先添加转发。"; return 1; }
-  install_realm_service
-  INIT="$(detect_init)"
-  if [ "$INIT" = "systemd" ]; then systemctl restart realm; systemctl status realm --no-pager -l
-  elif [ "$INIT" = "openrc" ]; then rc-service realm restart; rc-service realm status
-  else realm -c "$REALM_CONF"; fi
-}
 
 realm_stop(){
   INIT="$(detect_init)"
@@ -632,6 +641,7 @@ realm_stop(){
   else pkill realm 2>/dev/null || true; fi
 }
 
+# shellcheck disable=SC2009
 realm_status(){
   INIT="$(detect_init)"
   if [ "$INIT" = "systemd" ]; then systemctl status realm --no-pager -l
@@ -661,6 +671,7 @@ svc_stop(){
   green "已停止 Xray/sing-box 服务。"
 }
 
+# shellcheck disable=SC2009
 svc_status(){
   INIT="$(detect_init)"
   echo "Xray：$(xray_ver) | 状态：$(service_running)"
@@ -732,6 +743,8 @@ write_core_route(){
     printf "KEY_FILE=%s\n" "$(shell_quote "${KEY_FILE:-}")"
     for _key in OUT_TYPE OUT_HOST OUT_PORT OUT_NAME OUT_UUID OUT_FLOW OUT_SECURITY OUT_SNI OUT_FP OUT_PBK OUT_SID OUT_METHOD OUT_PASSWORD OUT_USER OUT_INSECURE OUT_OBFS OUT_OBFS_PASSWORD; do
       eval "_value=\${$_key:-}"
+      # _value is assigned through eval from a fixed key allowlist.
+      # shellcheck disable=SC2154
       printf "%s=%s\n" "$_key" "$(shell_quote "$_value")"
     done
   } > "$FILE"
@@ -787,18 +800,21 @@ port_in_use(){
   for nf in "$NODES_DIR"/*.env; do
     [ -f "$nf" ] || continue
     [ "$nf" = "$_exclude" ] && continue
+    # shellcheck disable=SC1090
     _lp="$(. "$nf" 2>/dev/null; printf "%s" "${LISTEN_PORT:-}")"
     [ "$_lp" = "$_p" ] && return 0
   done
   for cf in "$CORE_ROUTES_DIR"/*.env; do
     [ -f "$cf" ] || continue
     [ "$cf" = "$_exclude" ] && continue
+    # shellcheck disable=SC1090
     _cp="$(. "$cf" 2>/dev/null; printf "%s" "${LISTEN_PORT:-}")"
     [ "$_cp" = "$_p" ] && return 0
   done
   for rf in "$REALM_RULES_DIR"/*.env; do
     [ -f "$rf" ] || continue
     [ "$rf" = "$_exclude" ] && continue
+    # shellcheck disable=SC1090
     _rp="$(. "$rf" 2>/dev/null; printf "%s" "${REALM_LISTEN_PORT:-}")"
     [ "$_rp" = "$_p" ] && return 0
   done
@@ -858,101 +874,11 @@ node_link(){
     echo "socks5://${_auth}${PUBLIC_HOST}:${EXT_PORT}#${_name}"
   elif [ "$NODE_TYPE" = "hy2" ]; then
     echo "hysteria2://$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&insecure=1#$(url_encode "$NODE_NAME")"
+  elif [ "$NODE_TYPE" = "tuic" ]; then
+    echo "tuic://${UUID}:$(url_encode "$PASSWORD")@${PUBLIC_HOST}:${EXT_PORT}/?sni=$(url_encode "$SNI")&congestion_control=bbr&udp_relay_mode=native&allow_insecure=1#$(url_encode "$NODE_NAME")"
   fi
 }
 
-clash_yaml(){
-  f="$1"; _mode="${2:-proxy}"; load_node "$f"
-  command -v python3 >/dev/null 2>&1 || { yellow "需要 python3 才能生成 Clash Meta 配置。"; return 1; }
-  python3 - "$_mode" "$NODE_TYPE" "$NODE_NAME" "$PUBLIC_HOST" "$EXT_PORT" "$UUID" "$SNI" "$PUBLIC_KEY" "$SHORT_ID" "$METHOD" "$PASSWORD" "$SOCKS_USER" <<'PY'
-import sys
-
-mode, node_type, name, server, port, uuid, sni, public_key, short_id, method, password, socks_user = sys.argv[1:13]
-
-
-def q(value):
-    value = value or ""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
-def proxy_lines(indent="  "):
-    if node_type == "vless":
-        return [
-            f"{indent}- name: {q(name)}",
-            f"{indent}  type: vless",
-            f"{indent}  server: {q(server)}",
-            f"{indent}  port: {port}",
-            f"{indent}  uuid: {q(uuid)}",
-            f"{indent}  network: tcp",
-            f"{indent}  tls: true",
-            f"{indent}  udp: true",
-            f"{indent}  flow: xtls-rprx-vision",
-            f"{indent}  servername: {q(sni)}",
-            f"{indent}  client-fingerprint: chrome",
-            f"{indent}  reality-opts:",
-            f"{indent}    public-key: {q(public_key)}",
-            f"{indent}    short-id: {q(short_id)}",
-        ]
-    if node_type == "ss":
-        return [
-            f"{indent}- name: {q(name)}",
-            f"{indent}  type: ss",
-            f"{indent}  server: {q(server)}",
-            f"{indent}  port: {port}",
-            f"{indent}  cipher: {q(method)}",
-            f"{indent}  password: {q(password)}",
-            f"{indent}  udp: true",
-        ]
-    if node_type == "socks":
-        lines = [
-            f"{indent}- name: {q(name)}",
-            f"{indent}  type: socks5",
-            f"{indent}  server: {q(server)}",
-            f"{indent}  port: {port}",
-            f"{indent}  udp: true",
-        ]
-        if socks_user:
-            lines.extend([
-                f"{indent}  username: {q(socks_user)}",
-                f"{indent}  password: {q(password)}",
-            ])
-        return lines
-    if node_type == "hy2":
-        return [
-            f"{indent}- name: {q(name)}",
-            f"{indent}  type: hysteria2",
-            f"{indent}  server: {q(server)}",
-            f"{indent}  port: {port}",
-            f"{indent}  password: {q(password)}",
-            f"{indent}  sni: {q(sni)}",
-            f"{indent}  skip-cert-verify: true",
-            f"{indent}  udp: true",
-        ]
-    return []
-
-
-if mode == "config":
-    lines = [
-        "mixed-port: 7890",
-        "allow-lan: false",
-        "mode: rule",
-        "log-level: info",
-        "proxies:",
-        *proxy_lines("  "),
-        "proxy-groups:",
-        "  - name: PROXY",
-        "    type: select",
-        "    proxies:",
-        f"      - {q(name)}",
-        "rules:",
-        "  - MATCH,PROXY",
-    ]
-else:
-    lines = proxy_lines("  ")
-
-print("\n".join(lines))
-PY
-}
 
 safe_file_name(){
   _raw="$1"
@@ -1052,6 +978,23 @@ def proxy_lines(node):
             f"    port: {port}",
             f"    password: {q(node.get('PASSWORD'))}",
             f"    sni: {q(node.get('SNI'))}",
+            "    skip-cert-verify: true",
+            "    udp: true",
+        ]
+    if t == "tuic":
+        return [
+            f"  - name: {q(name)}",
+            "    type: tuic",
+            f"    server: {q(server)}",
+            f"    port: {port}",
+            f"    uuid: {q(node.get('UUID'))}",
+            f"    password: {q(node.get('PASSWORD'))}",
+            f"    sni: {q(node.get('SNI'))}",
+            "    alpn:",
+            "      - h3",
+            "    reduce-rtt: true",
+            "    udp-relay-mode: native",
+            "    congestion-controller: bbr",
             "    skip-cert-verify: true",
             "    udp: true",
         ]
@@ -1305,8 +1248,21 @@ elif scheme in ("hysteria2", "hy2"):
     )
     if data["OUT_OBFS"] not in ("", "salamander"):
         fail("当前仅支持 Hysteria2 salamander 混淆")
+elif scheme == "tuic":
+    uuid = unquote(u.username or "")
+    password = unquote(u.password or "")
+    if not uuid or not password:
+        fail("TUIC 链接缺少 UUID 或认证密码")
+    insecure = q.get("allow_insecure", q.get("insecure", "0")).lower() in ("1", "true", "yes")
+    data.update(
+        OUT_TYPE="tuic",
+        OUT_UUID=uuid,
+        OUT_PASSWORD=password,
+        OUT_SNI=q.get("sni", u.hostname or ""),
+        OUT_INSECURE="true" if insecure else "false",
+    )
 else:
-    fail("仅支持 vless://、ss://、socks://、socks5://、hysteria2://、hy2:// 链接")
+    fail("仅支持 vless://、ss://、socks://、socks5://、hysteria2://、hy2://、tuic:// 链接")
 
 with open(output, "w", encoding="utf-8", newline="\n") as f:
     for key, value in data.items():
@@ -1325,20 +1281,34 @@ add_node(){
   echo " [2] Shadowsocks"
   echo " [3] SOCKS5"
   echo " [4] Hysteria2"
+  echo " [5] TUIC"
   printf "\033[32m请选择 [1]: \033[0m"
   read -r T
   [ -z "$T" ] && T=1
   echo "已选择：$T"
   case "$T" in
-    1) command -v xray >/dev/null 2>&1 || { yellow "未检测到 Xray，VLESS Reality 需要先安装核心。"; install_xray || return; } ;;
-    2|3) : ;;
-    4) ensure_singbox_latest || return ;;
+    1|2|3)
+      if ! command -v xray >/dev/null 2>&1; then
+        yellow "未检测到 Xray，正在先安装核心。"
+        install_xray || return
+      fi
+      ;;
+    4|5)
+      if ! command -v sing-box >/dev/null 2>&1; then
+        yellow "未检测到 sing-box，正在先安装核心。"
+        install_singbox || return
+      fi
+      ;;
     *) red "选择无效。"; return ;;
   esac
   ensure_python || { red "需要 python3 才能生成配置。"; return; }
   yellow "正在检测服务器公网 IP..."
   DETECT_IP="$(get_public_ip)"
-  [ -n "$DETECT_IP" ] && green "检测到公网 IP：$DETECT_IP" || yellow "未检测到公网 IP，请手动输入。"
+  if [ -n "$DETECT_IP" ]; then
+    green "检测到公网 IP：$DETECT_IP"
+  else
+    yellow "未检测到公网 IP，请手动输入。"
+  fi
   NODE_ID="$(rand_hex 4)"
   NODE_TAG="node_$NODE_ID"
   PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
@@ -1374,13 +1344,19 @@ add_node(){
       PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
       generate_hy2_certificate "$NODE_ID" "$SNI" || return
       ;;
+    5)
+      NODE_TYPE="tuic"
+      NODE_NAME="$(ask_name "节点名称" "tuic-$EXT_PORT")"
+      SNI="$(ask_sni "TLS 证书域名/SNI" "www.microsoft.com")"
+      UUID="$(gen_uuid)"
+      PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
+      generate_hy2_certificate "$NODE_ID" "$SNI" || return
+      ;;
     *) red "选择无效。"; return ;;
   esac
   write_node
   green "节点已添加。"
-  if { [ "$T" = "2" ] || [ "$T" = "3" ]; } && ! command -v xray >/dev/null 2>&1; then
-    yellow "未安装 Xray，已保存节点和链接；需要 VPS 实际提供入站服务时再安装核心并应用配置。"
-  fi
+
   line
   echo "节点链接/参数："
   node_link "$NODES_DIR/$NODE_ID.env"
@@ -1450,7 +1426,7 @@ show_links(){
       echo "协议：SOCKS5"
       echo "用户名：$SOCKS_USER"
       echo "密码：$PASSWORD"
-    else
+    elif [ "$NODE_TYPE" = "hy2" ]; then
       echo "链接："
       node_link "$f"
       if CLASH_FILE="$(save_node_clash_file "$f")"; then
@@ -1460,6 +1436,20 @@ show_links(){
       echo "协议：Hysteria2"
       echo "认证密码：$PASSWORD"
       echo "SNI：$SNI"
+      echo "跳过证书验证：是（自签名证书）"
+    else
+      echo "链接："
+      node_link "$f"
+      if CLASH_FILE="$(save_node_clash_file "$f")"; then
+        echo "Clash 配置文件：$CLASH_FILE"
+      fi
+      echo "客户端参数："
+      echo "协议：TUIC"
+      echo "UUID：$UUID"
+      echo "认证密码：$PASSWORD"
+      echo "SNI：$SNI"
+      echo "拥塞控制：bbr"
+      echo "UDP relay：native"
       echo "跳过证书验证：是（自签名证书）"
     fi
   done
@@ -1520,9 +1510,10 @@ add_core_route(){
   echo " [2] Shadowsocks 入站（Xray）"
   echo " [3] SOCKS5 入站（Xray）"
   echo " [4] Hysteria2 入站（sing-box）"
+  echo " [5] TUIC 入站（sing-box）"
   printf "\033[32m请选择 [1]: \033[0m"
   read -r T; [ -n "$T" ] || T=1
-  case "$T" in 1|2|3|4) : ;; *) red "选择无效。"; return 1 ;; esac
+  case "$T" in 1|2|3|4|5) : ;; *) red "选择无效。"; return 1 ;; esac
 
   ensure_python || { red "需要 python3 解析代理链接。"; return 1; }
   yellow "正在检测服务器公网 IP..."
@@ -1553,16 +1544,21 @@ add_core_route(){
       NODE_TYPE="hy2"; NODE_NAME="$(ask_name "入站节点名称" "hy2-$EXT_PORT")"
       SNI="$(ask_sni "TLS 证书域名/SNI" "www.microsoft.com")"; PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
       ;;
+    5)
+      NODE_TYPE="tuic"; NODE_NAME="$(ask_name "入站节点名称" "tuic-$EXT_PORT")"
+      SNI="$(ask_sni "TLS 证书域名/SNI" "www.microsoft.com")"; UUID="$(gen_uuid)"; PASSWORD="$(ask "认证密码" "$(rand_hex 16)")"
+      ;;
   esac
 
   while true; do
     OUT_LINK="$(ask_required "粘贴分流/中转出口代理链接" "")"
     PARSED="/tmp/xrp-proxy-$ROUTE_ID.env"
     if parse_proxy_link "$OUT_LINK" "$PARSED"; then
+      # shellcheck disable=SC1090
       . "$PARSED"
       rm -f "$PARSED"
-      if [ "$NODE_TYPE" != "hy2" ] && [ "$OUT_TYPE" = "hy2" ]; then
-        red "Xray 入站不能直接使用 Hysteria2 出口，请换 VLESS/SS/SOCKS5 链接，或选择 Hysteria2 入站。"
+      if { [ "$NODE_TYPE" != "hy2" ] && [ "$NODE_TYPE" != "tuic" ]; } && { [ "$OUT_TYPE" = "hy2" ] || [ "$OUT_TYPE" = "tuic" ]; }; then
+        red "Xray 入站不能直接使用 Hysteria2/TUIC 出口，请换 VLESS/SS/SOCKS5 链接，或选择 Hysteria2/TUIC 入站。"
         continue
       fi
       break
@@ -1572,7 +1568,7 @@ add_core_route(){
   done
   green "已识别出口：$OUT_TYPE | $OUT_HOST:$OUT_PORT | $OUT_NAME"
 
-  if [ "$NODE_TYPE" = "hy2" ]; then
+  if [ "$NODE_TYPE" = "hy2" ] || [ "$NODE_TYPE" = "tuic" ]; then
     ensure_singbox_latest || return 1
     generate_hy2_certificate "$ROUTE_ID" "$SNI" || return 1
   else
@@ -1909,15 +1905,25 @@ def xray_outbound(route):
 
 
 def sing_inbound(node):
-    if node.get("NODE_TYPE") != "hy2":
-        return None
-    return {
-        "type": "hysteria2", "tag": node.get("NODE_TAG"), "listen": "0.0.0.0",
-        "listen_port": number(node.get("LISTEN_PORT")),
-        "users": [{"name": node.get("NODE_NAME"), "password": node.get("PASSWORD")}],
-        "tls": {"enabled": True, "server_name": node.get("SNI"),
-                "certificate_path": node.get("CERT_FILE"), "key_path": node.get("KEY_FILE")},
-    }
+    kind = node.get("NODE_TYPE")
+    if kind == "hy2":
+        return {
+            "type": "hysteria2", "tag": node.get("NODE_TAG"), "listen": "0.0.0.0",
+            "listen_port": number(node.get("LISTEN_PORT")),
+            "users": [{"name": node.get("NODE_NAME"), "password": node.get("PASSWORD")}],
+            "tls": {"enabled": True, "server_name": node.get("SNI"),
+                    "certificate_path": node.get("CERT_FILE"), "key_path": node.get("KEY_FILE")},
+        }
+    if kind == "tuic":
+        return {
+            "type": "tuic", "tag": node.get("NODE_TAG"), "listen": "0.0.0.0",
+            "listen_port": number(node.get("LISTEN_PORT")),
+            "users": [{"uuid": node.get("UUID"), "password": node.get("PASSWORD")}],
+            "congestion_control": "bbr",
+            "tls": {"enabled": True, "server_name": node.get("SNI"),
+                    "certificate_path": node.get("CERT_FILE"), "key_path": node.get("KEY_FILE")},
+        }
+    return None
 
 
 def sing_outbound(route):
@@ -1949,6 +1955,12 @@ def sing_outbound(route):
         if route.get("OUT_OBFS"):
             base["obfs"] = {"type": route.get("OUT_OBFS"), "password": route.get("OUT_OBFS_PASSWORD")}
         return base
+    if kind == "tuic":
+        base.update(uuid=route.get("OUT_UUID"), password=route.get("OUT_PASSWORD"),
+                    congestion_control="bbr", udp_relay_mode="native")
+        base["tls"] = {"enabled": True, "server_name": route.get("OUT_SNI"),
+                       "insecure": route.get("OUT_INSECURE") == "true"}
+        return base
     return None
 
 
@@ -1960,7 +1972,7 @@ if core == "xray":
     outbounds = [{"protocol": "freedom", "tag": "direct", "settings": {}}]
     rules = []
     for route in routes:
-        if route.get("NODE_TYPE") == "hy2":
+        if route.get("NODE_TYPE") in ("hy2", "tuic"):
             continue
         outbound = xray_outbound(route)
         if outbound:
@@ -1975,7 +1987,7 @@ elif core == "sing-box":
     outbounds = [{"type": "direct", "tag": "direct"}]
     rules = []
     for route in routes:
-        if route.get("NODE_TYPE") != "hy2":
+        if route.get("NODE_TYPE") not in ("hy2", "tuic"):
             continue
         outbound = sing_outbound(route)
         if outbound:
@@ -2051,7 +2063,7 @@ apply_all_configs_silent(){
 }
 
 apply_core_for_type(){
-  if [ "$1" = "hy2" ]; then apply_core_config sing-box
+  if [ "$1" = "hy2" ] || [ "$1" = "tuic" ]; then apply_core_config sing-box
   else apply_core_config xray; fi
 }
 
@@ -2099,6 +2111,7 @@ uninstall_panel(){
     read -r C
     [ "$C" = "yes" ] || { yellow "已取消"; return; }
     svc_stop >/dev/null 2>&1 || true
+    realm_stop >/dev/null 2>&1 || true
     INIT="$(detect_init)"
     if [ "$INIT" = "systemd" ]; then
       systemctl disable xray sing-box realm >/dev/null 2>&1 || true
