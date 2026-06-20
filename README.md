@@ -27,6 +27,7 @@ xrp
 - 安装/更新 Xray 与 sing-box 核心；Alpine 自动使用 musl 版本
 - 添加 VLESS Reality、Shadowsocks、SOCKS5、Hysteria2、TUIC 入站节点
 - 添加节点前会先检测对应核心；Xray 节点自动安装 Xray，Hysteria2/TUIC 节点自动安装 sing-box
+- 添加和修改节点只需填写一个端口，客户端连接端口与服务监听端口保持一致
 - 查看五类节点的客户端导入链接
 - 自动生成并用核心校验 `/usr/local/etc/xray/config.json` 和 `/usr/local/etc/sing-box/config.json`
 - 核心分流/中转支持粘贴 VLESS、Shadowsocks、SOCKS5、Hysteria2、TUIC 链接自动导入出口参数

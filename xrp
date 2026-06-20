@@ -846,16 +846,6 @@ ask_listen_port(){
   done
 }
 
-ask_port(){
-  _prompt="$1"; _default="$2"
-  while true; do
-    _p="$(ask "$_prompt" "$_default")"
-    case "$_p" in ''|*[!0-9]*) red "端口必须是数字。" >&2; continue ;; esac
-    if [ "$_p" -ge 1 ] && [ "$_p" -le 65535 ]; then printf "%s" "$_p"; return; fi
-    red "端口需在 1-65535。" >&2
-  done
-}
-
 node_link(){
   f="$1"; load_node "$f"
   if [ "$NODE_TYPE" = "vless" ]; then
@@ -886,7 +876,7 @@ select_node_file(){
   i=1
   for f in $files; do
     load_node "$f"
-    echo " [$i] $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT | 监听 $LISTEN_PORT"
+    echo " [$i] $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT"
     eval "NODE_FILE_$i=\"$f\""
     i=$((i+1))
   done
@@ -1108,8 +1098,8 @@ add_node(){
   NODE_ID="$(rand_hex 4)"
   NODE_TAG="node_$NODE_ID"
   PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
-  LISTEN_PORT="$(ask_listen_port "服务监听端口" "$(rand_port)")"
-  EXT_PORT="$(ask_port "客户端连接端口" "$LISTEN_PORT")"
+  LISTEN_PORT="$(ask_listen_port "节点端口" "$(rand_port)")"
+  EXT_PORT="$LISTEN_PORT"
   SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""; CERT_FILE=""; KEY_FILE=""
   case "$T" in
     1)
@@ -1166,7 +1156,7 @@ list_nodes(){
   line; green "节点列表"
   for f in $files; do
     load_node "$f"
-    echo "- $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT | 监听 $LISTEN_PORT"
+    echo "- $NODE_NAME | $NODE_TYPE | $PUBLIC_HOST:$EXT_PORT"
   done
 }
 
@@ -1250,8 +1240,8 @@ change_node_port(){
   select_node_file || return
   load_node "$SELECTED_NODE"
   _self="$SELECTED_NODE"
-  LISTEN_PORT="$(ask_listen_port "服务监听端口" "$LISTEN_PORT" "$_self")"
-  EXT_PORT="$(ask_port "客户端连接端口" "$EXT_PORT")"
+  LISTEN_PORT="$(ask_listen_port "节点端口" "$LISTEN_PORT" "$_self")"
+  EXT_PORT="$LISTEN_PORT"
   write_node
   green "端口已修改。"
   echo "节点链接/参数："
@@ -1299,8 +1289,8 @@ add_core_route(){
   NODE_TAG="route_in_$ROUTE_ID"
   ROUTE_NAME="$(ask_name "任务名称" "route-$ROUTE_ID")"
   PUBLIC_HOST="$(ask_required "客户端连接地址/域名" "$DETECT_IP")"
-  LISTEN_PORT="$(ask_listen_port "入站监听端口" "$(rand_port)")"
-  EXT_PORT="$(ask_port "客户端连接端口" "$LISTEN_PORT")"
+  LISTEN_PORT="$(ask_listen_port "入站端口" "$(rand_port)")"
+  EXT_PORT="$LISTEN_PORT"
   SNI=""; UUID=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""; METHOD=""; PASSWORD=""; SOCKS_USER=""; CERT_FILE=""; KEY_FILE=""
   case "$T" in
     1)
