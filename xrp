@@ -1796,7 +1796,8 @@ apply_core_config(){
   if [ "$_core" = "xray" ]; then _target="$CONF_FILE"; _binary="xray"
   else _target="$SINGBOX_CONF"; _binary="sing-box"; fi
   command -v "$_binary" >/dev/null 2>&1 || return 0
-  _tmp="${_target}.new.$$"
+  # Xray 26+ detects config format from the filename suffix, so keep .json last.
+  _tmp="${_target}.new.$$.json"
   generate_core_config "$_core" "$_tmp"
   _rc=$?
   if [ "$_rc" -eq 3 ]; then
